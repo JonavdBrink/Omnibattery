@@ -3971,6 +3971,10 @@ class PricingManager:
             and self._curtailment_opportunistic_space(curtailment_plan) <= 1e-6
         ):
             self._controller._dp_pre_evaluated_slots[next_slot.start] = deficit_needed
+            # A stale typed purpose would shadow this verdict.
+            getattr(self._controller, "_dp_pre_evaluated_purposes", {}).pop(
+                next_slot.start, None
+            )
             return
 
         opportunity_needed = False
