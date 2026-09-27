@@ -655,10 +655,10 @@ class AnkerModbusDriver(BatteryDriver):
         # reads "charging" (or 0, passing the array straight through) while the AC
         # port exports the commanded discharge — issue #366. The unit's own AC
         # contribution is pack minus array, in the same +in/-out convention.
-        # Not 10012: it matched that on the #366 hardware but also carries grid
-        # passthrough to loads behind the unit — an E5000 read 10012=1550 W with
-        # pack and PV at 0, which the fleet reconstruction took for a 1550 W charge
-        # and capped the discharge (#468). The AC families have no DC array, so
+        # Not 10012: it matched that on the #366 hardware, but with an Anker CT
+        # meter attached it tracks the house grid — an E5000 read 10012=1550 W
+        # with pack and PV at 0 and no backup load, which the fleet
+        # reconstruction took for a 1550 W charge and capped the discharge (#468). The AC families have no DC array, so
         # 10008 is already the AC value there.
         if (
             self.has_independent_pv
