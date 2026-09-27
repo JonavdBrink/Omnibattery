@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Dynamic Pricing no longer re-buys the same deficit across closely following slots**: it charged to the ceiling instead of the planned energy (#518).
+- **Sunrise and solar noon now match the almanac** (#410, #516): computed with `astral` (as HA's `sun.sun`) instead of an approximate formula that ran up to ~27 min late. Thanks to @syphernl.
 
 ## [1.5.0b4] - 2026-09-22
 
@@ -23,7 +24,6 @@
 - **Charge Delay is evaluated once per control cycle instead of twice** (#511). Thanks to @syphernl.
 - **Sessy and Hoymiles battery pages now show the configured capacity** instead of a dash.
 - **Charge Delay no longer loads the CPU while the consumption profile is still learning** (#511). Thanks to @syphernl.
-- **Sunrise and solar noon now match the almanac** (#410): both came from a declination-only formula without the equation of time or atmospheric refraction, so in the Netherlands the overnight horizon ended 19 minutes after the real sunrise in late September and 27 minutes after it in early November. They now come from `astral`, the library behind Home Assistant's `sun.sun`, so the plan budgets to the actual sunrise. Thanks to @syphernl.
 
 ## [1.5.0b3] - 2026-09-21
 
