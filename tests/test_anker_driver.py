@@ -686,7 +686,26 @@ async def test_dc_coupled_sku_publishes_its_ac_port_beside_pack_power():
 
     assert snap["battery_power"] == 0        # pack idle — what excluded the battery
     assert snap["ac_delivered_power"] == -1350  # ...while the AC port delivers
-    assert "grid_power" in drv.control_dependency_keys
+    assert "pv_power" in drv.control_dependency_keys
+
+
+@pytest.mark.asyncio
+async def test_grid_passthrough_on_10012_is_not_delivery():
+    """Issue #468: an E5000 read 10012=+1550 W with pack and PV both at 0 -- grid
+    passing through to loads behind the unit. Published as delivery it read as a
+    1550 W charge and the fleet ceiling capped the discharge; the unit's own AC
+    contribution is pack minus array, here 0."""
+    client = _fake_client()
+    buf = [0] * 51
+    buf[12], buf[13] = encode_int32(1550)  # 10012: passthrough, not this battery
+    client.async_read_input_block = AsyncMock(return_value=buf)
+
+    drv = _driver(client=client)
+    drv._set_product_code("DN7M")
+    snap = await drv.read_telemetry(["battery_power", "grid_power", "solar_power"])
+
+    assert snap["grid_power"] == 1550
+    assert snap["ac_delivered_power"] == 0
 
 
 @pytest.mark.asyncio

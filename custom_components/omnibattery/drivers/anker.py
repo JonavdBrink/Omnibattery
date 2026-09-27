@@ -653,14 +653,19 @@ class AnkerModbusDriver(BatteryDriver):
             snapshot.pop("ac_power", None)
         # On a DC-coupled SKU 10008 is pack power, so with the MPPTs producing it
         # reads "charging" (or 0, passing the array straight through) while the AC
-        # port exports the commanded discharge — issue #366. 10012 is this unit's
-        # own AC exchange, in the same +in/-out convention, and satisfies
-        # grid_power == battery_power - pv_power on the reported hardware. The AC
-        # families have no DC array, so 10008 is already the AC value there and
-        # 10012 buys the delivery check nothing.
-        grid_power = snapshot.get("grid_power")
-        if self.has_independent_pv and isinstance(grid_power, (int, float)):
-            snapshot[DELIVERED_AC_POWER_KEY] = grid_power
+        # port exports the commanded discharge — issue #366. The unit's own AC
+        # contribution is pack minus array, in the same +in/-out convention.
+        # Not 10012: it matched that on the #366 hardware but also carries grid
+        # passthrough to loads behind the unit — an E5000 read 10012=1550 W with
+        # pack and PV at 0, which the fleet reconstruction took for a 1550 W charge
+        # and capped the discharge (#468). The AC families have no DC array, so
+        # 10008 is already the AC value there.
+        if (
+            self.has_independent_pv
+            and isinstance(battery_power, (int, float))
+            and isinstance(pv_power, (int, float))
+        ):
+            snapshot[DELIVERED_AC_POWER_KEY] = int(battery_power) - int(pv_power)
         temperature = snapshot.get("temperature")
         if isinstance(temperature, (int, float)):
             snapshot["internal_temperature"] = temperature
@@ -789,9 +794,9 @@ class AnkerModbusDriver(BatteryDriver):
             "battery_power",
             "battery_status",
             "temperature",
-            # AC-port feedback for the delivery check (#366). Already in the
+            # AC-side delivery = pack - array (#366, #468). Already in the
             # 10000-10050 batch, so keeping it costs no extra read.
-            "grid_power",
+            "pv_power",
         })
 
     async def apply_config(

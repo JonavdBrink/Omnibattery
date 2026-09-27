@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **Anker E5000 no longer caps the fleet discharge when grid passes through it to backup loads**: its AC contribution is now pack minus PV, not register 10012 (#468).
 - **Dynamic Pricing no longer re-buys the same deficit across closely following slots**: it charged to the ceiling instead of the planned energy (#518).
 - **Sunrise and solar noon now match the almanac** (#410, #516): computed with `astral` (as HA's `sun.sun`) instead of an approximate formula that ran up to ~27 min late. Thanks to @syphernl.
 
