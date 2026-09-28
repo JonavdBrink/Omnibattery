@@ -732,6 +732,13 @@
   },
   "options": {
     "step": {
+      "remove_battery": {
+        "title": "Batterij verwijderen",
+        "description": "Kies de batterij die je wilt verwijderen. Het apparaat en de entiteiten worden verwijderd en de integratie wordt herladen.",
+        "data": {
+          "battery": "Batterij"
+        }
+      },
       "three_phase": {
         "title": "Driefasige stroombeveiliging",
         "description": "Configureer voor elke te beschermen fase een realtime RMS-stroomsensor met teken en een zekeringgrootte/stroomlimiet in ampère. Laat beide velden leeg voor ongebruikte fasen. De sensoren moeten verschillende Home Assistant-sensorentiteiten met eenheid A of mA zijn; positief betekent import en negatief export.",
@@ -763,6 +770,7 @@
         "menu_options": {
           "sensors": "Sensoren",
           "batteries": "Batterijen",
+          "remove_battery": "Batterij verwijderen",
           "time_slots": "Tijdslots",
           "excluded_devices": "Uitgesloten apparaten",
           "predictive_charging": "Voorspellend laden",

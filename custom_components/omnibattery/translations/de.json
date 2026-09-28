@@ -732,6 +732,13 @@
   },
   "options": {
     "step": {
+      "remove_battery": {
+        "title": "Batterie entfernen",
+        "description": "Wähle die zu entfernende Batterie. Ihr Gerät und ihre Entitäten werden gelöscht und die Integration neu geladen.",
+        "data": {
+          "battery": "Batterie"
+        }
+      },
       "three_phase": {
         "title": "Dreiphasiger Stromschutz",
         "description": "Konfigurieren Sie für jede zu schützende Phase einen signierten Echtzeit-RMS-Stromsensor und eine Sicherungsgröße/Stromgrenze in Ampere. Lassen Sie beide Felder für nicht verwendete Phasen leer. Die Sensoren müssen unterschiedliche Home-Assistant-Sensor-Entitäten mit der Einheit A oder mA sein; positiv bedeutet Import, negativ Export.",
@@ -763,6 +770,7 @@
         "menu_options": {
           "sensors": "Sensoren",
           "batteries": "Batterien",
+          "remove_battery": "Batterie entfernen",
           "time_slots": "Zeitfenster",
           "excluded_devices": "Ausgeschlossene Geräte",
           "predictive_charging": "Prädiktive Ladung",

@@ -736,6 +736,13 @@
   },
   "options": {
     "step": {
+      "remove_battery": {
+        "title": "Supprimer une batterie",
+        "description": "Choisissez la batterie à supprimer. Son appareil et ses entités sont supprimés et l'intégration est rechargée.",
+        "data": {
+          "battery": "Batterie"
+        }
+      },
       "three_phase": {
         "title": "Protection de courant triphasée",
         "description": "Configurez pour chaque phase à protéger un capteur de courant RMS signé en temps réel et une taille/limite de fusible en ampères. Laissez les deux champs vides pour les phases non utilisées. Les capteurs doivent être des entités sensor distinctes avec une unité A ou mA ; positif signifie importation et négatif exportation.",
@@ -767,6 +774,7 @@
         "menu_options": {
           "sensors": "Capteurs",
           "batteries": "Batteries",
+          "remove_battery": "Supprimer une batterie",
           "time_slots": "Plages horaires",
           "excluded_devices": "Appareils exclus",
           "predictive_charging": "Charge prédictive",

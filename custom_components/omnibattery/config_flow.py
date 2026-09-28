@@ -92,6 +92,7 @@ from .const import (
     CONF_DELAY_SOC_SETPOINT_ENABLED,
     CONF_BATTERY_VERSION,
     CONF_DC_PV_CONNECTED,
+    CONF_PRIMARY_BATTERY,
     CONF_SLAVE_ID,
     DEFAULT_SLAVE_ID,
     CONF_SERIAL_PORT,
@@ -3656,15 +3657,46 @@ class OptionsFlowHandler(OptionsFlow):
         # Weekly full charge, charge delay, temperature charge limit, capacity
         # protection, hourly balance and the PD controller are configured live
         # from the dashboard entities, not here.
-        return self.async_show_menu(
-            step_id="init",
-            menu_options=[
-                "sensors",
-                "batteries",
-                "time_slots",
-                "excluded_devices",
-                "predictive_charging",
-            ],
+        menu_options = [
+            "sensors",
+            "batteries",
+            "time_slots",
+            "excluded_devices",
+            "predictive_charging",
+        ]
+        if len(self.config_entry.data.get("batteries", [])) > 1:
+            menu_options.insert(2, "remove_battery")
+        return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    async def async_step_remove_battery(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Remove one specific battery (the count flow can only drop the last one)."""
+        batteries = list(self.config_entry.data.get("batteries", []))
+        if user_input is not None:
+            removed = batteries.pop(int(user_input["battery"]))
+            self.config_data["batteries"] = batteries
+            if self.config_entry.data.get(CONF_PRIMARY_BATTERY) == removed.get(CONF_NAME):
+                self.config_data[CONF_PRIMARY_BATTERY] = ""
+            result = await self._save_and_finish()
+            # Drop the now-orphaned device (and its entities); same key as coordinator.device_key.
+            slave = removed.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID)
+            key = f"{removed.get(CONF_HOST)}_{removed.get(CONF_PORT)}"
+            if slave != 1:
+                key = f"{key}_{slave}"
+            dev_reg = dr.async_get(self.hass)
+            if device := dev_reg.async_get_device(identifiers={(DOMAIN, key)}):
+                dev_reg.async_remove_device(device.id)
+            return result
+
+        return self.async_show_form(
+            step_id="remove_battery",
+            data_schema=vol.Schema({
+                vol.Required("battery"): SelectSelector(SelectSelectorConfig(
+                    options=[
+                        {"value": str(i), "label": b.get(CONF_NAME, f"Battery {i + 1}")}
+                        for i, b in enumerate(batteries)
+                    ],
+                )),
+            }),
         )
 
     async def async_step_sensors(self, user_input: dict[str, Any] | None = None) -> FlowResult:

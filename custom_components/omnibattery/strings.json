@@ -731,12 +731,20 @@
   },
   "options": {
     "step": {
+      "remove_battery": {
+        "title": "Remove a battery",
+        "description": "Choose the battery to remove. Its device and entities are deleted and the integration reloads.",
+        "data": {
+          "battery": "Battery"
+        }
+      },
       "init": {
         "title": "Reconfigure Omnibattery",
         "description": "Select which section you want to configure.",
         "menu_options": {
           "sensors": "Sensors",
           "batteries": "Batteries",
+          "remove_battery": "Remove a battery",
           "time_slots": "Time slots",
           "excluded_devices": "Excluded devices",
           "predictive_charging": "Predictive charging",

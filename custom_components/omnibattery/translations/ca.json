@@ -732,6 +732,13 @@
   },
   "options": {
     "step": {
+      "remove_battery": {
+        "title": "Eliminar una bateria",
+        "description": "Tria la bateria a eliminar. Se n'esborren el dispositiu i les entitats i la integració es recarrega.",
+        "data": {
+          "battery": "Bateria"
+        }
+      },
       "three_phase": {
         "title": "Protecció de corrent trifàsica",
         "description": "Configura un sensor de corrent RMS amb signe i la mida del fusible en amperes per a cada fase que vulguis protegir. Deixa tots dos camps buits per a les fases no utilitzades. Els sensors han de ser entitats sensor diferents amb unitats A o mA; positiu significa importació i negatiu exportació.",
@@ -763,6 +770,7 @@
         "menu_options": {
           "sensors": "Sensors",
           "batteries": "Bateries",
+          "remove_battery": "Eliminar una bateria",
           "time_slots": "Franges horàries",
           "excluded_devices": "Dispositius exclosos",
           "predictive_charging": "Càrrega predictiva",

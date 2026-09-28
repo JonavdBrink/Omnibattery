@@ -2,6 +2,10 @@
 
 ## [1.5.0b5] - 2026-09-28
 
+### Added
+
+- **Remove any battery from the options menu**: pick it by name; its device and entities are deleted too. Before, only the last battery could be dropped, and deleting the device was rejected.
+
 ### Fixed
 
 - **Anker E5000 with a CT meter no longer caps the fleet discharge**: its AC contribution is now pack minus PV, not register 10012 (grid reading) (#468).
