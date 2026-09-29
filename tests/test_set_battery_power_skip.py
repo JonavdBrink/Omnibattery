@@ -23,6 +23,8 @@ from homeassistant.util import dt as dt_util
 from custom_components.omnibattery import ChargeDischargeController
 from custom_components.omnibattery.const import (
     DISCHARGE_ENGAGE_GRACE_S,
+    HIGH_SOC_CHARGE_TAPER_FLOOR,
+    HIGH_SOC_CHARGE_TAPER_GRACE_S,
     IDLE_RUNAWAY_GRACE_S,
     PD_READBACK_EVERY_N_WRITES,
 )
@@ -107,6 +109,7 @@ def _controller():
         _last_commanded_net_sign={},
         _charge_engage_started={},
         _discharge_engage_started={},
+        _high_soc_taper_started={},
         _idle_commanded_started={},
         _non_responsive=SimpleNamespace(
             record_non_delivery=lambda *a, **k: False,
@@ -395,6 +398,73 @@ async def test_bms_full_charge_cutoff_is_not_non_responsive():
 
     record.assert_not_called()
     clear.assert_called_once_with(coord)
+
+
+async def test_high_soc_charge_taper_is_not_non_responsive():
+    """The last stretch before 100% legitimately tapers to a fraction of the
+    commanded power well before the BMS confirms a cutoff (which needs
+    Standby + <=10 W) -- must not be judged as a fault while within the
+    taper grace (observed on a Huawei LUNA2000: 48-189 W of a 7000 W command
+    for ~15 minutes climbing 99% -> 100%, inverter never in Standby)."""
+    coord = _Coord({
+        "battery_power": 48,
+        "battery_soc": 99,
+        "inverter_state": 0,
+    })
+    ctrl = _controller()
+    record = MagicMock(return_value=None)
+    clear = MagicMock()
+    ctrl._non_responsive.record_non_delivery = record
+    ctrl._non_responsive.clear = clear
+
+    await ctrl._check_non_delivery(
+        coord, 7000, 48, attempt=0, direction="charge",
+    )
+
+    record.assert_not_called()
+    clear.assert_called_once_with(coord)
+
+
+async def test_high_soc_charge_taper_grace_expires_into_a_fault():
+    """A battery physically stuck in the 99-100% band, rather than tapering to
+    completion, must still surface as a fault once the taper grace runs out --
+    the exemption above must not mask a genuine stall forever."""
+    coord = _Coord({
+        "battery_power": 48,
+        "battery_soc": 99,
+        "inverter_state": 0,
+    })
+    ctrl = _controller()
+    ctrl._high_soc_taper_started[coord] = dt_util.utcnow() - timedelta(
+        seconds=HIGH_SOC_CHARGE_TAPER_GRACE_S + 1
+    )
+    record = MagicMock(return_value=None)
+    ctrl._non_responsive.record_non_delivery = record
+
+    await ctrl._check_non_delivery(
+        coord, 7000, 48, attempt=0, direction="charge",
+    )
+
+    record.assert_called_once()
+
+
+async def test_below_high_soc_taper_floor_is_judged_normally():
+    """Just under the taper floor, low charge power is a fault immediately --
+    no grace applies outside the top-of-charge band."""
+    coord = _Coord({
+        "battery_power": 48,
+        "battery_soc": HIGH_SOC_CHARGE_TAPER_FLOOR - 1,
+        "inverter_state": 0,
+    })
+    ctrl = _controller()
+    record = MagicMock(return_value=None)
+    ctrl._non_responsive.record_non_delivery = record
+
+    await ctrl._check_non_delivery(
+        coord, 7000, 48, attempt=0, direction="charge",
+    )
+
+    record.assert_called_once()
 
 
 async def test_charge_standby_non_delivery_wakes_then_excludes():

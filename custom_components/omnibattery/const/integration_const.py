@@ -471,6 +471,24 @@ HOT_PATH_READBACK_MAX_LATENCY_S = 1.5
 # engages is still caught, just this many seconds later.
 DISCHARGE_ENGAGE_GRACE_S = 30
 
+# Top-of-charge tail: the last stretch before 100% often tapers hard (CC/CV
+# tail current) well before is_battery_full() reports the battery full or
+# tick_bms_cutoff() confirms a cutoff (which needs power <= 10 W *and*
+# Standby). Observed on a Huawei LUNA2000: 48-189 W of a 7000 W command for
+# ~15 minutes while SOC climbed 99% -> 100%, inverter never reporting
+# Standby. That gap was recorded as non-delivery and drove wake nudges
+# (RS485 re-assert) despite SOC genuinely still rising. Matches
+# tick_bms_cutoff's own taper-zone gate so both treat the same SOC band as
+# "possibly tapering".
+HIGH_SOC_CHARGE_TAPER_FLOOR = 99  # %: at/above this, judge charge non-delivery as a possible taper first
+
+# Bound on the exemption above: a battery that gets physically stuck in the
+# 99-100% band, rather than genuinely tapering to completion, must still
+# surface as a fault eventually -- just later than one charging normally
+# through it. Comfortably longer than the ~15-26 minutes observed for a
+# real taper.
+HIGH_SOC_CHARGE_TAPER_GRACE_S = 45 * 60
+
 # Idle-runaway floor: a battery commanded to idle (0 W) that is actually moving
 # more than this many watts has slipped out of RS485 forced mode and is running
 # its own internal logic (a v3 can export to grid this way — see issue #434). Above

@@ -226,6 +226,8 @@ from .const import (
     MISSING_SENSOR_ISSUE_DELAY_S,
     HOT_PATH_READBACK_MAX_LATENCY_S,
     DISCHARGE_ENGAGE_GRACE_S,
+    HIGH_SOC_CHARGE_TAPER_FLOOR,
+    HIGH_SOC_CHARGE_TAPER_GRACE_S,
     IDLE_RUNAWAY_POWER_W,
     IDLE_RUNAWAY_GRACE_S,
     DISCHARGE_MIN_SOC_REENTRY_MARGIN,
@@ -847,6 +849,10 @@ class ChargeDischargeController:
         self._last_commanded_net_sign: dict[MarstekVenusDataUpdateCoordinator, int] = {}
         self._charge_engage_started: dict[MarstekVenusDataUpdateCoordinator, datetime] = {}
         self._discharge_engage_started: dict[MarstekVenusDataUpdateCoordinator, datetime] = {}
+        # Top-of-charge taper grace: the time a battery was first seen charging
+        # at SOC >= HIGH_SOC_CHARGE_TAPER_FLOOR without clearing the 10%-of-
+        # commanded delivery bar. See _check_non_delivery.
+        self._high_soc_taper_started: dict[MarstekVenusDataUpdateCoordinator, datetime] = {}
         # Idle ramp-down grace: the time the commanded direction flipped from a
         # move into idle. The idle-runaway judgment is suppressed for
         # IDLE_RUNAWAY_GRACE_S after the flip so a battery still ramping down
@@ -2438,6 +2444,7 @@ class ChargeDischargeController:
             "_last_commanded_net_sign",
             "_charge_engage_started",
             "_discharge_engage_started",
+            "_high_soc_taper_started",
             "_idle_commanded_started",
             "_idle_runaway_handled",
         ):
@@ -7132,6 +7139,7 @@ class ChargeDischargeController:
             coordinator.data or {}, actual_power, is_charge=is_charge
         )
         if delivered_power >= 0.10 * commanded_power:
+            self._high_soc_taper_started.pop(coordinator, None)
             self._non_responsive.clear(coordinator)
             return
         engage_times = (
@@ -7171,8 +7179,43 @@ class ChargeDischargeController:
                     "cutoff is active — not a fault",
                     coordinator.name,
                 )
+                self._high_soc_taper_started.pop(coordinator, None)
                 self._non_responsive.clear(coordinator)
                 return
+            # Top-of-charge tail: the last stretch before 100% often tapers hard
+            # (CC/CV tail current) well before is_battery_full() above fires or
+            # tick_bms_cutoff() confirms a cutoff (which needs power <= 10 W
+            # *and* Standby). Observed on a Huawei LUNA2000: 48-189 W of a
+            # 7000 W command for ~15 minutes while SOC climbed 99% -> 100%,
+            # inverter never in Standby - genuinely still charging, just at a
+            # reduced tail current below the 10%-of-commanded bar above.
+            # Bounded by HIGH_SOC_CHARGE_TAPER_GRACE_S: a battery that gets
+            # physically stuck in this band rather than tapering to completion
+            # still surfaces as a fault, just later.
+            current_soc = coordinator.data.get("battery_soc", 0) if coordinator.data else 0
+            if current_soc >= HIGH_SOC_CHARGE_TAPER_FLOOR:
+                now = dt_util.utcnow()
+                taper_started = self._high_soc_taper_started.setdefault(coordinator, now)
+                taper_elapsed_s = (now - taper_started).total_seconds()
+                if taper_elapsed_s < HIGH_SOC_CHARGE_TAPER_GRACE_S:
+                    _LOGGER.debug(
+                        "[%s] Low charge power (%.0fW of %.0fW commanded) at "
+                        "SOC %.1f%% — top-of-charge taper (%.0fs of %ds "
+                        "grace), not a fault",
+                        coordinator.name, delivered_power, commanded_power,
+                        current_soc, taper_elapsed_s, HIGH_SOC_CHARGE_TAPER_GRACE_S,
+                    )
+                    self._non_responsive.clear(coordinator)
+                    return
+                _LOGGER.debug(
+                    "[%s] Still only %.0fW of %.0fW commanded after %.0fs at "
+                    "SOC %.1f%% — past the top-of-charge taper grace, judging "
+                    "as a fault",
+                    coordinator.name, delivered_power, commanded_power,
+                    taper_elapsed_s, current_soc,
+                )
+            else:
+                self._high_soc_taper_started.pop(coordinator, None)
         # Skip non-responsive recording when the BMS is legitimately
         # refusing discharge: either at/near the configured min-SOC, or
         # anywhere below the low-SOC protective floor where the BMS may
