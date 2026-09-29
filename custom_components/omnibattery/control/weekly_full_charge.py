@@ -125,6 +125,8 @@ class WeeklyFullChargeManager:
             # is_battery_full()/availability checks which can run repeatedly
             # during the same control cycle.
             tick_retry_acceptance()
+        # Consecutive accepted-charge samples that must precede a counter reset.
+        accept_counts = self.__dict__.setdefault("_bms_accept_counts", {})
         for c in ctrl.coordinators:
             if getattr(c, "battery_manual_mode_enabled", False):
                 # Individual manual mode owns the battery. Freeze its cutoff
@@ -172,6 +174,7 @@ class WeeklyFullChargeManager:
                     )
                 )
                 if cutoff:
+                    accept_counts.pop(c.name, None)
                     count = self._bms_cutoff_counts.get(c.name, 0) + 1
                     self._bms_cutoff_counts[c.name] = count
                     if count == 1:
@@ -187,7 +190,16 @@ class WeeklyFullChargeManager:
                             c.name, soc, count, _BMS_CUTOFF_POWER_W,
                         )
                 elif power is not None and power > _BMS_CUTOFF_POWER_W:
-                    # Battery is accepting charge → genuinely not full. Reset.
+                    # Battery is accepting charge → genuinely not full, but only
+                    # once acceptance is sustained. A BMS that flaps Charge ↔
+                    # Standby every few seconds at its cutoff (v3 at 88% with
+                    # every cell full) never refuses 5 cycles in a row, and a
+                    # one-sample reset kept it from ever confirming.
+                    accepts = accept_counts.get(c.name, 0) + 1
+                    accept_counts[c.name] = accepts
+                    if accepts < _BMS_CUTOFF_REQUIRED_CYCLES:
+                        continue
+                    accept_counts.pop(c.name, None)
                     if self._bms_cutoff_counts.get(c.name, 0) > 0:
                         _LOGGER.debug(
                             "%s: BMS cutoff condition cleared (charging at %.1fW) — "
@@ -201,6 +213,7 @@ class WeeklyFullChargeManager:
                 # battery stops being commanded, which would otherwise reset it).
             else:
                 self._bms_cutoff_counts[c.name] = 0
+                accept_counts.pop(c.name, None)
 
     def reset_bms_cutoff_confirmation(self, coordinator: Any) -> None:
         """Forget a provisional cutoff before the one-shot retry begins."""

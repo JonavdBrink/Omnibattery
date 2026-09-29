@@ -427,6 +427,36 @@ class MaxSocChargeManager:
         except (TypeError, ValueError):
             return False
 
+    def _recal_accept_sustained(self, coordinator, data: dict) -> bool:
+        """Return True once charge has been accepted for N consecutive cycles.
+
+        A single accepted sample is not proof the battery is filling: a v3 BMS
+        at its cutoff can flap Charge ↔ Standby every few seconds, and resetting
+        the cutoff counter on each Charge sample kept it from ever latching.
+        Refusals clear the streak; idle cycles freeze it.
+        """
+        streaks = self._controller.__dict__.setdefault(
+            "_normal_balance_recal_accept_count", {}
+        )
+        power = data.get("battery_power")
+        try:
+            accepting = (
+                power is not None and float(power) > NORMAL_BALANCE_RECAL_CUTOFF_POWER_W
+            )
+        except (TypeError, ValueError):
+            accepting = False
+        if self._bms_cut_signature(coordinator, data):
+            streaks.pop(coordinator, None)
+            return False
+        if not accepting:
+            return False
+        count = streaks.get(coordinator, 0) + 1
+        if count >= NORMAL_BALANCE_RECAL_CUTOFF_CYCLES:
+            streaks.pop(coordinator, None)
+            return True
+        streaks[coordinator] = count
+        return False
+
     def _compute_recal_override(self, coordinator, vmax_f: float, soc) -> bool:
         """Decide whether to keep charging past the top-voltage threshold to recalibrate SOC.
 
@@ -476,6 +506,7 @@ class MaxSocChargeManager:
                 c._normal_balance_recal_cutoff_count.pop(coordinator, None)
                 return False
 
+            accept_sustained = self._recal_accept_sustained(coordinator, data)
             if self._bms_cut_signature(coordinator, data):
                 count = c._normal_balance_recal_cutoff_count.get(coordinator, 0) + 1
                 c._normal_balance_recal_cutoff_count[coordinator] = count
@@ -490,18 +521,9 @@ class MaxSocChargeManager:
                         soc,
                     )
                     return False
-            else:
-                power = data.get("battery_power")
-                try:
-                    accepting = (
-                        power is not None
-                        and float(power) > NORMAL_BALANCE_RECAL_CUTOFF_POWER_W
-                    )
-                except (TypeError, ValueError):
-                    accepting = False
-                if accepting:
-                    # The retry is still in progress; only a new refusal can end it.
-                    c._normal_balance_recal_cutoff_count.pop(coordinator, None)
+            elif accept_sustained:
+                # The retry is still in progress; only a new refusal can end it.
+                c._normal_balance_recal_cutoff_count.pop(coordinator, None)
             return True
 
         if soc is None or soc >= NORMAL_BALANCE_RECAL_SOC_THRESHOLD:
@@ -511,6 +533,7 @@ class MaxSocChargeManager:
         if c._normal_balance_recal_latched.get(coordinator):
             return False
 
+        accept_sustained = self._recal_accept_sustained(coordinator, data)
         if self._bms_cut_signature(coordinator, data):
             count = c._normal_balance_recal_cutoff_count.get(coordinator, 0) + 1
             c._normal_balance_recal_cutoff_count[coordinator] = count
@@ -542,16 +565,8 @@ class MaxSocChargeManager:
                     )
                 return False
         else:
-            power = data.get("battery_power")
-            try:
-                accepting = (
-                    power is not None
-                    and float(power) > NORMAL_BALANCE_RECAL_CUTOFF_POWER_W
-                )
-            except (TypeError, ValueError):
-                accepting = False
-            if accepting:
-                # The battery is accepting charge, so it is genuinely not full.
+            if accept_sustained:
+                # Sustained acceptance: the battery is genuinely not full.
                 c._normal_balance_recal_cutoff_count.pop(coordinator, None)
                 c._normal_balance_recal_first_cutoff_voltage.pop(coordinator, None)
             # When idle or not commanded, freeze the counter: neither increment
@@ -568,6 +583,7 @@ class MaxSocChargeManager:
         c._normal_balance_recal_retry_pending.pop(coordinator, None)
         c._normal_balance_recal_retry_active.pop(coordinator, None)
         c._normal_balance_recal_first_cutoff_voltage.pop(coordinator, None)
+        c.__dict__.get("_normal_balance_recal_accept_count", {}).pop(coordinator, None)
 
     def refresh_blocks(self) -> None:
         """Update normal high-SOC charge protection blockers.

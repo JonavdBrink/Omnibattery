@@ -649,8 +649,24 @@ def test_recal_override_cutoff_counter_resets_when_charge_resumes():
     m = _mgr(ctrl)
     m._compute_recal_override(c, 3.55, 95)  # count -> 1
     c.data.update(battery_power=300, inverter_state=0)  # charge resumed
+    for _ in range(NORMAL_BALANCE_RECAL_CUTOFF_CYCLES - 1):
+        assert m._compute_recal_override(c, 3.55, 95) is True
+    assert ctrl._normal_balance_recal_cutoff_count[c] == 1  # brief acceptance keeps it
     assert m._compute_recal_override(c, 3.55, 95) is True
     assert c not in ctrl._normal_balance_recal_cutoff_count
+
+
+def test_recal_override_latches_through_charge_standby_flapping():
+    """A BMS flapping Charge ↔ Standby at its cutoff must still latch."""
+    c = _recal_coord(power=5, inv=1)
+    ctrl = _controller([c])
+    m = _mgr(ctrl)
+    for _ in range(NORMAL_BALANCE_RECAL_CUTOFF_CYCLES):
+        c.data.update(battery_power=5, inverter_state=1)
+        m._compute_recal_override(c, 3.55, 88)
+        c.data.update(battery_power=300, inverter_state=2)
+        m._compute_recal_override(c, 3.55, 88)
+    assert ctrl._normal_balance_recal_latched.get(c) is True
 
 
 def test_recal_override_never_latches_on_idle_battery():
