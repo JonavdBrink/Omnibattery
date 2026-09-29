@@ -770,7 +770,6 @@
         "menu_options": {
           "sensors": "Sensoren",
           "batteries": "Batterijen",
-          "remove_battery": "Batterij verwijderen",
           "time_slots": "Tijdslots",
           "excluded_devices": "Uitgesloten apparaten",
           "predictive_charging": "Voorspellend laden",
@@ -809,6 +808,14 @@
         }
       },
       "batteries": {
+        "title": "Batterijen",
+        "description": "Batterijen toevoegen of wijzigen, of een specifieke verwijderen.",
+        "menu_options": {
+          "battery_count": "Batterijen toevoegen / wijzigen",
+          "remove_battery": "Batterij verwijderen"
+        }
+      },
+      "battery_count": {
         "title": "Aantal batterijen",
         "description": "Wijzig het aantal batterijen. Als u het aantal vermindert, worden de laatst geconfigureerde batterijen verwijderd.",
         "data": {

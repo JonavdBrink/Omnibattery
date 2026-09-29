@@ -770,7 +770,6 @@
         "menu_options": {
           "sensors": "Sensors",
           "batteries": "Bateries",
-          "remove_battery": "Eliminar una bateria",
           "time_slots": "Franges horàries",
           "excluded_devices": "Dispositius exclosos",
           "predictive_charging": "Càrrega predictiva",
@@ -809,6 +808,14 @@
         }
       },
       "batteries": {
+        "title": "Bateries",
+        "description": "Afegeix o modifica bateries, o elimina'n una de concreta.",
+        "menu_options": {
+          "battery_count": "Afegir / modificar bateries",
+          "remove_battery": "Eliminar una bateria"
+        }
+      },
+      "battery_count": {
         "title": "Nombre de bateries",
         "description": "Modifica el nombre de bateries. Si reduceixes el nombre, s'eliminaran les últimes bateries configurades.",
         "data": {

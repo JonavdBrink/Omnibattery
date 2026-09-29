@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Remove any battery from the options menu**: pick it by name; its device and entities are deleted too. Before, only the last battery could be dropped, and deleting the device was rejected.
+- **Remove any battery from the options flow** (Batteries → Remove a battery): pick it by name; its device and entities are deleted too. Before, only the last battery could be dropped, and deleting the device was rejected.
 
 ### Fixed
 

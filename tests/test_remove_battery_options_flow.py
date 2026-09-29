@@ -25,9 +25,10 @@ def _options_flow(entry) -> OptionsFlowHandler:
     return flow
 
 
-async def test_menu_hides_remove_with_single_battery():
+async def test_single_battery_skips_submenu_to_count_form():
     flow = _options_flow(_entry([{"name": "Venus 1"}]))
-    assert "remove_battery" not in (await flow.async_step_init())["menu_options"]
+    flow.async_show_form = lambda **kw: kw
+    assert (await flow.async_step_batteries())["step_id"] == "battery_count"
 
 
 async def test_removes_first_battery_and_its_device():
@@ -37,7 +38,7 @@ async def test_removes_first_battery_and_its_device():
         {"name": "Venus 2", "host": "10.0.0.3", "port": 502, "slave_id": 2},
     ]
     flow = _options_flow(_entry(batteries))
-    assert "remove_battery" in (await flow.async_step_init())["menu_options"]
+    assert (await flow.async_step_batteries())["menu_options"] == ["battery_count", "remove_battery"]
 
     dev_reg = MagicMock()
     dev_reg.async_get_device.return_value = SimpleNamespace(id="dev-venus-1")

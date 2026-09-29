@@ -3664,8 +3664,6 @@ class OptionsFlowHandler(OptionsFlow):
             "excluded_devices",
             "predictive_charging",
         ]
-        if len(self.config_entry.data.get("batteries", [])) > 1:
-            menu_options.insert(2, "remove_battery")
         return self.async_show_menu(step_id="init", menu_options=menu_options)
 
     async def async_step_remove_battery(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -3907,6 +3905,12 @@ class OptionsFlowHandler(OptionsFlow):
         )
 
     async def async_step_batteries(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Batteries submenu: add/modify, or remove a specific one (needs 2+)."""
+        if len(self.config_entry.data.get("batteries", [])) < 2:
+            return await self.async_step_battery_count()
+        return self.async_show_menu(step_id="batteries", menu_options=["battery_count", "remove_battery"])
+
+    async def async_step_battery_count(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure number of batteries."""
         try:
             if user_input is not None:
@@ -3921,7 +3925,7 @@ class OptionsFlowHandler(OptionsFlow):
             return self.async_abort(reason="unknown_error")
 
         return self.async_show_form(
-            step_id="batteries",
+            step_id="battery_count",
             data_schema=_battery_count_schema(current_batteries),
         )
 

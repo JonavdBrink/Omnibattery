@@ -745,7 +745,6 @@
         "menu_options": {
           "sensors": "Sensors",
           "batteries": "Batteries",
-          "remove_battery": "Remove a battery",
           "time_slots": "Time slots",
           "excluded_devices": "Excluded devices",
           "predictive_charging": "Predictive charging",
@@ -811,6 +810,14 @@
         }
       },
       "batteries": {
+        "title": "Batteries",
+        "description": "Add or modify batteries, or remove a specific one.",
+        "menu_options": {
+          "battery_count": "Add / modify batteries",
+          "remove_battery": "Remove a battery"
+        }
+      },
+      "battery_count": {
         "title": "Number of batteries",
         "description": "Modify the number of batteries. If you reduce the number, the last configured batteries will be removed.",
         "data": {

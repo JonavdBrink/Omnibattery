@@ -770,7 +770,6 @@
         "menu_options": {
           "sensors": "Sensoren",
           "batteries": "Batterien",
-          "remove_battery": "Batterie entfernen",
           "time_slots": "Zeitfenster",
           "excluded_devices": "Ausgeschlossene Geräte",
           "predictive_charging": "Prädiktive Ladung",
@@ -809,6 +808,14 @@
         }
       },
       "batteries": {
+        "title": "Batterien",
+        "description": "Batterien hinzufügen oder ändern, oder eine bestimmte entfernen.",
+        "menu_options": {
+          "battery_count": "Batterien hinzufügen / ändern",
+          "remove_battery": "Batterie entfernen"
+        }
+      },
+      "battery_count": {
         "title": "Anzahl der Batterien",
         "description": "Ändern Sie die Anzahl der Batterien. Wenn Sie die Anzahl reduzieren, werden die zuletzt konfigurierten Batterien entfernt.",
         "data": {
