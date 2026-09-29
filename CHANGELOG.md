@@ -12,7 +12,7 @@
 - **Dynamic Pricing no longer re-buys the same deficit across closely following slots**: it charged to the ceiling instead of the planned energy (#518).
 - **Overcast days no longer reset a mature solar profile**: capacity-change detection now compares each day's production with its forecast instead of raw peaks, so grey days the forecast predicted are not taken as lost capacity.
 - **Sunrise and solar noon now match the almanac** (#410, #516): computed with `astral` (as HA's `sun.sun`) instead of an approximate formula that ran up to ~27 min late. Thanks to @syphernl.
-- **A battery that finished charging no longer keeps a stale "battery not delivering" Repair open**: once a battery reaches its configured ceiling it correctly stops being commanded, but that was also the only place the non-responsive tracker's BMS-full exemption ran, so a battery that briefly tapered through a non-delivery episode on its way to 100% stayed "degraded" forever once idle-full, and any Repair it had raised never resolved on its own.
+- **A battery at 100% SOC (or a confirmed BMS cutoff) no longer keeps a stale "battery not delivering" Repair open**: once a battery is full it correctly stops being commanded to charge, but that was also the only place the non-responsive tracker's charge-side BMS-full exemption ran, so a battery that briefly tapered through a non-delivery episode on its way to full stayed "degraded" forever once idle-full, and any charge-side Repair it had raised never resolved on its own. A genuine discharge or comms fault on an otherwise-full battery is left alone.
 
 ## [1.5.0b4] - 2026-09-22
 

@@ -45,6 +45,23 @@ class NonResponsiveTracker:
         """Flat exclusion cooldown in minutes (read by the diagnostic sensor)."""
         return self._cooldown_min
 
+    def last_reason(self, coordinator, default: str = "") -> str:
+        """Return the reason category recorded for this battery's last fail.
+
+        Charge-side reasons are prefixed ``charge_`` (see ``record_non_delivery``);
+        discharge-side non-delivery and every ``record_comm_failure`` reason
+        (``modbus_write_failed``, ``driver_exception``, ``feedback_timeout``,
+        ``ack_mismatch``, ``comm_failure``) are not. Callers that only want to
+        act on a charge-side exemption (e.g. a BMS full-charge cutoff) must not
+        clear a battery whose last recorded reason isn't one, or a genuine
+        discharge/comms fault on an otherwise-full battery is silently wiped
+        every cycle and never reaches exclusion or a Repair.
+        """
+        info = self.batteries.get(coordinator)
+        if not info:
+            return default
+        return info.get("reason") or default
+
     def is_excluded(self, coordinator) -> bool:
         """Return True if the battery is currently in non-responsive cooldown.
 
