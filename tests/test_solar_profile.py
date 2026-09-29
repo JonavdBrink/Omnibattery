@@ -265,6 +265,40 @@ def test_sustained_peak_shift_starts_a_new_generation():
     )
 
 
+def _forecast_backed_days(reference: date, recent_energy: float, recent_forecast: float):
+    days = {}
+    for offset in range(17, 0, -1):
+        local_date = reference - timedelta(days=offset)
+        day = _full_day(local_date)
+        day.forecast_reference_kwh = 24.0
+        if offset <= 3:
+            day.energy_kwh = [recent_energy] * SOLAR_PROFILE_INTERVAL_COUNT
+            day.forecast_reference_kwh = recent_forecast
+        days[local_date] = day
+    return days
+
+
+def test_forecast_matched_overcast_days_are_not_a_capacity_change():
+    """Grey days the forecast predicted halve the peak but not the capacity."""
+    profile = _profile()
+    profile.request_save = lambda: None
+    reference = date.today()
+    profile._days = _forecast_backed_days(reference, 0.125, 12.0)
+
+    assert profile.detect_capacity_regime(reference) is False
+    assert profile.generation == 1
+
+
+def test_sustained_shortfall_against_forecast_starts_a_new_generation():
+    profile = _profile()
+    profile.request_save = lambda: None
+    reference = date.today()
+    profile._days = _forecast_backed_days(reference, 0.175, 24.0)
+
+    assert profile.detect_capacity_regime(reference) is True
+    assert profile.generation == 2
+
+
 def test_invalid_direct_power_does_not_become_a_zero_sample():
     tracker = ConsumptionTracker.__new__(ConsumptionTracker)
     tracker._hass = SimpleNamespace(

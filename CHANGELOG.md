@@ -10,6 +10,7 @@
 
 - **Anker E5000 with a CT meter no longer caps the fleet discharge**: its AC contribution is now pack minus PV, not register 10012 (grid reading) (#468).
 - **Dynamic Pricing no longer re-buys the same deficit across closely following slots**: it charged to the ceiling instead of the planned energy (#518).
+- **Overcast days no longer reset a mature solar profile**: capacity-change detection now compares each day's production with its forecast instead of raw peaks, so grey days the forecast predicted are not taken as lost capacity.
 - **Sunrise and solar noon now match the almanac** (#410, #516): computed with `astral` (as HA's `sun.sun`) instead of an approximate formula that ran up to ~27 min late. Thanks to @syphernl.
 
 ## [1.5.0b4] - 2026-09-22
