@@ -6787,6 +6787,13 @@ class ChargeDischargeController:
             and self._last_commanded_net_sign.get(coordinator) != 1
         ):
             self._charge_engage_started[coordinator] = dt_util.utcnow()
+            # A stale taper timestamp from a prior charge session must not
+            # survive into this one: a battery that tapered near 100% SOC,
+            # then idled/discharged for a while (still reporting SOC >= the
+            # taper floor) before charging again would otherwise walk straight
+            # into "past the grace" on the very first low-power reading of the
+            # new session.
+            self._high_soc_taper_started.pop(coordinator, None)
             self._non_responsive.clear(coordinator, delivering=False)
         if (
             not preserve_non_responsive_episode
