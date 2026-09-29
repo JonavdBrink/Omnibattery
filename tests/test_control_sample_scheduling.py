@@ -75,12 +75,16 @@ def _main_controller(state_holder, pd_calls):
             begin_cycle=lambda: None,
             update_degraded_warning=lambda: None,
         ),
-        _non_responsive=SimpleNamespace(update_repairs=lambda *a: None),
+        _non_responsive=SimpleNamespace(
+            update_repairs=lambda *a: None, clear=lambda c, **k: None,
+        ),
         _consumption_tracker=None,
         _balance_monitor=None,
         _pricing_mgr=SimpleNamespace(maybe_check_price_data_health=lambda: None),
         manual_mode_enabled=False,
-        _weekly_charge_mgr=SimpleNamespace(handle_registers=_async_noop),
+        _weekly_charge_mgr=SimpleNamespace(
+            handle_registers=_async_noop, is_battery_full=lambda c: False,
+        ),
         _charge_delay_mgr=SimpleNamespace(handle_daily_reset_and_eval=lambda: None),
         _refresh_operation_blockers=lambda: None,
         _try_apply_manual_slot=_async_noop,
@@ -214,6 +218,41 @@ def test_repeated_publication_does_not_reapply_pd_but_real_change_runs_once():
     asyncio.run(controller._run_control_cycle(now=first_report + timedelta(seconds=10)))
     assert len(pd_calls) == 2
     assert controller.previous_power == previous_power
+
+
+def test_full_battery_clears_the_non_responsive_tracker():
+    """A battery at its charge ceiling stops being commanded (is_battery_full()
+    in _get_available_batteries), so it never reaches _check_non_delivery
+    again - the only other place that clears the non-responsive tracker via
+    the BMS-full exemption. _run_control_cycle must clear it directly, or a
+    battery that tapered through a brief non-delivery episode on its way to
+    100% stays "degraded" forever once idle-full, and a battery_not_delivering
+    Repair it already raised never resolves on its own.
+    """
+    reported_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state_holder = {"state": _state(100, reported_at)}
+    controller = _main_controller(state_holder, [])
+    controller._weekly_charge_mgr.is_battery_full = lambda c: True
+    cleared = []
+    controller._non_responsive.clear = lambda c, **k: cleared.append(c)
+
+    asyncio.run(controller._run_control_cycle(now=reported_at))
+
+    assert cleared == controller.coordinators
+
+
+def test_non_full_battery_is_left_alone():
+    """The new full-battery sweep must not touch a battery that isn't full."""
+    reported_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state_holder = {"state": _state(100, reported_at)}
+    controller = _main_controller(state_holder, [])
+    controller._weekly_charge_mgr.is_battery_full = lambda c: False
+    cleared = []
+    controller._non_responsive.clear = lambda c, **k: cleared.append(c)
+
+    asyncio.run(controller._run_control_cycle(now=reported_at))
+
+    assert cleared == []
 
 
 def test_unavailable_consumption_sensor_does_not_spam_warnings(caplog):

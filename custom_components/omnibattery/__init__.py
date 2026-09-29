@@ -8823,6 +8823,20 @@ class ChargeDischargeController:
             return
         self._phase_power_limiter.begin_cycle()
         self._phase_power_limiter.update_degraded_warning()
+        # A battery that reaches its charge ceiling stops being commanded (see
+        # is_battery_full() in _get_available_batteries below) and therefore
+        # never reaches _check_non_delivery again - the only place that clears
+        # the non-responsive tracker via the BMS-full exemption. Without this,
+        # a battery that tapered through a brief non-delivery episode on its
+        # way to 100% stays "degraded" forever once idle-full, and a
+        # battery_not_delivering Repair it already raised never resolves on
+        # its own. Runs ahead of update_repairs() so a battery that just
+        # became full this cycle clears before the Repair check below reads it.
+        weekly_mgr = getattr(self, "_weekly_charge_mgr", None)
+        if weekly_mgr is not None:
+            for coordinator in self.coordinators:
+                if weekly_mgr.is_battery_full(coordinator):
+                    self._non_responsive.clear(coordinator)
         self._non_responsive.update_repairs(
             self.hass, getattr(self.config_entry, "entry_id", "") or ""
         )
