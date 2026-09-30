@@ -14,6 +14,7 @@
 - **A BMS that cuts off below 100% while flapping Charge ↔ Standby is now recognised as full**: a single accepted sample reset the cutoff detector, so a Venus E v3 stuck at 88% with every cell full was commanded to charge forever.
 - **Sunrise and solar noon now match the almanac** (#410, #516): computed with `astral` (as HA's `sun.sun`) instead of an approximate formula that ran up to ~27 min late. Thanks to @syphernl.
 - **A normal top-of-charge taper is no longer treated as a dead battery**: the last stretch before 100% can drop to a fraction of the commanded power well before the BMS confirms a cutoff (Standby + ≤10 W), which the non-delivery tracker read as a fault and answered with repeated wake nudges (RS485 re-assert) even though SOC kept climbing. A battery charging at SOC ≥ 99% now gets up to 45 minutes to finish tapering before being judged non-responsive; one genuinely stuck in that band still surfaces as a fault, just later.
+- **A full battery (100% SOC or confirmed BMS cutoff) no longer keeps a stale charge-side "battery not delivering" Repair open**; discharge and comms faults are left alone (#524). Thanks to @sphings79.
 
 ## [1.5.0b4] - 2026-09-22
 

@@ -11,11 +11,17 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from homeassistant.core import State
 
 from custom_components.omnibattery import ChargeDischargeController
 from custom_components.omnibattery.const import PREDICTIVE_MODE_DYNAMIC_PRICING
+from custom_components.omnibattery.tracking.non_responsive_tracker import (
+    NonResponsiveTracker,
+)
+
+_TRACKER = "custom_components.omnibattery.tracking.non_responsive_tracker"
 
 
 class _HashableNamespace(SimpleNamespace):
@@ -75,12 +81,18 @@ def _main_controller(state_holder, pd_calls):
             begin_cycle=lambda: None,
             update_degraded_warning=lambda: None,
         ),
-        _non_responsive=SimpleNamespace(update_repairs=lambda *a: None),
+        _non_responsive=SimpleNamespace(
+            update_repairs=lambda *a: None,
+            clear=lambda c, **k: None,
+            last_reason=lambda c, default="": default,
+        ),
         _consumption_tracker=None,
         _balance_monitor=None,
         _pricing_mgr=SimpleNamespace(maybe_check_price_data_health=lambda: None),
         manual_mode_enabled=False,
-        _weekly_charge_mgr=SimpleNamespace(handle_registers=_async_noop),
+        _weekly_charge_mgr=SimpleNamespace(
+            handle_registers=_async_noop, is_battery_full=lambda c: False,
+        ),
         _charge_delay_mgr=SimpleNamespace(handle_daily_reset_and_eval=lambda: None),
         _refresh_operation_blockers=lambda: None,
         _try_apply_manual_slot=_async_noop,
@@ -214,6 +226,87 @@ def test_repeated_publication_does_not_reapply_pd_but_real_change_runs_once():
     asyncio.run(controller._run_control_cycle(now=first_report + timedelta(seconds=10)))
     assert len(pd_calls) == 2
     assert controller.previous_power == previous_power
+
+
+def test_full_battery_with_a_charge_episode_clears_the_tracker():
+    """A battery at 100%/a confirmed BMS cutoff stops being commanded to
+    charge (is_battery_full() in _get_available_batteries), so it never
+    reaches _check_non_delivery's charge path again - the only other place
+    that clears the non-responsive tracker via the BMS-full exemption.
+    _run_control_cycle must clear a charge-side episode directly, or a
+    battery that tapered through a brief non-delivery episode on its way to
+    100% stays "degraded" forever once idle-full, and a battery_not_delivering
+    Repair it already raised never resolves on its own.
+    """
+    reported_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state_holder = {"state": _state(100, reported_at)}
+    controller = _main_controller(state_holder, [])
+    controller._weekly_charge_mgr.is_battery_full = lambda c: True
+    controller._non_responsive = NonResponsiveTracker(fail_threshold=3)
+    coord = controller.coordinators[0]
+    for _ in range(6):  # grace round (wake) + second threshold-cross (exclude)
+        controller._non_responsive.record_non_delivery(
+            coord, 1250, 5, reason="charge_non_delivery",
+        )
+    assert controller._non_responsive.batteries[coord]["degraded_since"] is not None
+    controller._non_responsive.batteries[coord]["repair_raised"] = True
+
+    with patch(f"{_TRACKER}.ir.async_delete_issue") as delete_issue:
+        asyncio.run(controller._run_control_cycle(now=reported_at))
+
+    assert controller._non_responsive.batteries[coord]["fail_count"] == 0
+    assert controller._non_responsive.batteries[coord]["degraded_since"] is None
+    delete_issue.assert_called_once()
+
+
+def test_full_battery_with_a_discharge_episode_is_left_alone():
+    """A full battery is still a live discharge candidate: if it ACKs a
+    discharge set-point but stays in Standby, _check_non_delivery deliberately
+    records standby_no_delivery to drive the wake/reconnect recovery (#26).
+    The full-battery sweep must not wipe that just because SOC also reads
+    full, or a genuine discharge fault (or a record_comm_failure reason, none
+    of which carry the charge_ prefix either) never reaches exclusion or its
+    own Repair.
+    """
+    reported_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state_holder = {"state": _state(100, reported_at)}
+    controller = _main_controller(state_holder, [])
+    controller._weekly_charge_mgr.is_battery_full = lambda c: True
+    controller._non_responsive = NonResponsiveTracker(fail_threshold=3)
+    coord = controller.coordinators[0]
+    for _ in range(6):  # grace round (wake) + second threshold-cross (exclude)
+        controller._non_responsive.record_non_delivery(
+            coord, 600, 0, reason="standby_no_delivery",
+        )
+    fail_count_before = controller._non_responsive.batteries[coord]["fail_count"]
+    degraded_since_before = controller._non_responsive.batteries[coord]["degraded_since"]
+    assert degraded_since_before is not None
+    # Repair already open for the discharge fault: it must stay open.
+    degraded_since_before -= timedelta(days=1)
+    controller._non_responsive.batteries[coord]["degraded_since"] = degraded_since_before
+    controller._non_responsive.batteries[coord]["repair_raised"] = True
+
+    with patch(f"{_TRACKER}.ir.async_delete_issue") as delete_issue:
+        asyncio.run(controller._run_control_cycle(now=reported_at))
+
+    delete_issue.assert_not_called()
+
+    assert controller._non_responsive.batteries[coord]["fail_count"] == fail_count_before
+    assert controller._non_responsive.batteries[coord]["degraded_since"] == degraded_since_before
+
+
+def test_non_full_battery_is_left_alone():
+    """The new full-battery sweep must not touch a battery that isn't full."""
+    reported_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state_holder = {"state": _state(100, reported_at)}
+    controller = _main_controller(state_holder, [])
+    controller._weekly_charge_mgr.is_battery_full = lambda c: False
+    cleared = []
+    controller._non_responsive.clear = lambda c, **k: cleared.append(c)
+
+    asyncio.run(controller._run_control_cycle(now=reported_at))
+
+    assert cleared == []
 
 
 def test_unavailable_consumption_sensor_does_not_spam_warnings(caplog):

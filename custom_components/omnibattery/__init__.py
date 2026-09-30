@@ -8873,6 +8873,30 @@ class ChargeDischargeController:
             return
         self._phase_power_limiter.begin_cycle()
         self._phase_power_limiter.update_degraded_warning()
+        # A battery at 100% SOC or a confirmed BMS cutoff (is_battery_full())
+        # stops being commanded to charge (see _get_available_batteries below)
+        # and therefore never reaches _check_non_delivery's charge path again -
+        # the only place that clears the non-responsive tracker via the
+        # BMS-full exemption. Without this, a battery that tapered through a
+        # brief non-delivery episode on its way to full stays "degraded"
+        # forever once idle-full, and a battery_not_delivering Repair it
+        # already raised never resolves on its own. Runs ahead of
+        # update_repairs() so a battery that just became full this cycle
+        # clears before the Repair check below reads it.
+        #
+        # Gated on the *last recorded reason* being charge-side: a full battery
+        # is still a live discharge candidate, and clearing unconditionally
+        # would wipe a genuine discharge non-delivery (standby_no_delivery,
+        # issue #26) or comms failure (record_comm_failure) every cycle,
+        # before it ever reaches exclusion or a Repair of its own.
+        weekly_mgr = getattr(self, "_weekly_charge_mgr", None)
+        if weekly_mgr is not None:
+            for coordinator in self.coordinators:
+                if (
+                    weekly_mgr.is_battery_full(coordinator)
+                    and self._non_responsive.last_reason(coordinator, "").startswith("charge_")
+                ):
+                    self._non_responsive.clear(coordinator)
         self._non_responsive.update_repairs(
             self.hass, getattr(self.config_entry, "entry_id", "") or ""
         )

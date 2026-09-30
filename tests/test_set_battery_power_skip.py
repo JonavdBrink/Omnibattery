@@ -500,6 +500,16 @@ async def test_new_charge_session_gets_a_fresh_taper_grace():
     assert result is True
     record.assert_not_called()
 
+    # The first reading is still covered by the engage grace; judge again once
+    # it has elapsed, so only the reset taper clock stands in the way.
+    ctrl._charge_engage_started[coord] = dt_util.utcnow() - timedelta(
+        seconds=DISCHARGE_ENGAGE_GRACE_S + 1
+    )
+    assert await ChargeDischargeController._set_battery_power(
+        ctrl, coord, 500, 0,
+    ) is True
+    record.assert_not_called()
+
 
 async def test_charge_standby_non_delivery_wakes_then_excludes():
     """A stalled charge must use the same fresh-reconnect recovery as discharge."""
