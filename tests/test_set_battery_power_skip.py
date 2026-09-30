@@ -501,13 +501,17 @@ async def test_new_charge_session_gets_a_fresh_taper_grace():
     record.assert_not_called()
 
     # The first reading is still covered by the engage grace; judge again once
-    # it has elapsed, so only the reset taper clock stands in the way.
+    # it has elapsed, so only the reset taper clock stands in the way. A new
+    # setpoint forces a real write (an unchanged one is skipped unjudged), and
+    # a zeroed write counter makes it a readback write.
     ctrl._charge_engage_started[coord] = dt_util.utcnow() - timedelta(
         seconds=DISCHARGE_ENGAGE_GRACE_S + 1
     )
+    coord._pd_write_count = 0
     assert await ChargeDischargeController._set_battery_power(
-        ctrl, coord, 500, 0,
+        ctrl, coord, 600, 0,
     ) is True
+    assert ctrl._high_soc_taper_started.get(coord) is not None
     record.assert_not_called()
 
 
