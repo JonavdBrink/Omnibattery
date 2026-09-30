@@ -103,6 +103,12 @@ def parse_nordpool_prices(attrs: dict) -> list:
                 value = entry.get("value")
                 if start is None or end is None or value is None:
                     continue
+                # Template sensors that recalculate Nordpool prices render
+                # datetimes as ISO strings.
+                if isinstance(start, str):
+                    start = datetime.fromisoformat(start)
+                if isinstance(end, str):
+                    end = datetime.fromisoformat(end)
                 # Convert to local datetime if timezone-aware
                 if hasattr(start, "tzinfo") and start.tzinfo is not None:
                     start = dt_util.as_local(start).replace(tzinfo=None)

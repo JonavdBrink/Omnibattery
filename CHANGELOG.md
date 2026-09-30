@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Re-evaluate button no longer fails with a template-recalculated Nordpool sensor**: `raw_today`/`raw_tomorrow` start/end rendered as text crashed with `'>' not supported between 'str' and 'datetime'`; they are now parsed as datetimes.
+
 ## [1.5.0b5] - 2026-09-28
 
 ### Added
