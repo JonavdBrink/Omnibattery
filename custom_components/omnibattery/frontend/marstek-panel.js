@@ -3972,7 +3972,7 @@ class MarstekVenusPanel extends HTMLElement {
       n.style.top = e.ly + "%";
       // v2 bottom row: anchor by the top edge so the power value lines up even
       // when a label has an extra badge row (battery).
-      if (v2 && e.ly > 50) n.style.transform = "translate(-50%, 0)";
+      if (v2 && e.ly > 50) n.classList.add("lbl-bottom");
       n.innerHTML =
         `<div class="lbl-val num"><span class="fn-v">—</span><span class="fn-unit"></span></div>` +
         `<div class="lbl-cap pf-label">${e.cap}</div>` +
@@ -7461,6 +7461,15 @@ class MarstekVenusPanel extends HTMLElement {
       .scene-stage { position: relative; width: 100%; max-width: 540px; aspect-ratio: 1; margin: 0 auto; container-type: inline-size; }
       .scene-stage.wide { max-width: none; aspect-ratio: 1672 / 941; }
       .scene-stage.wide .scene-self { left: 3%; transform: none; }
+      .scene-stage.wide .lbl-bottom { transform: translate(-50%, 0); }
+      /* phone width: the 16:9 stage is ~200px tall, so the bottom row has no
+         room for the battery badge (SOC is in the hero card) and the
+         self-consumption chip wraps to two lines so it stays in the
+         bottom-left corner, clear of the battery label at x=30%. */
+      @container (max-width: 560px) {
+        .scene-stage.wide .lbl-bottom .lbl-badge { display: none; }
+        .scene-stage.wide .scene-self { left: 2%; bottom: 2%; max-width: 16%; line-height: 1.2; }
+      }
       .scene-stage.wide .lead { stroke-width: 0.2; }
       .scene-stage.wide .lead.on { stroke-width: 0.25; }
       .scene-stage.wide .lead-flow { stroke-width: 0.25; }
