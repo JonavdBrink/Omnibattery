@@ -3831,8 +3831,8 @@ class MarstekVenusPanel extends HTMLElement {
     // axis-aligned (straight, or an L-elbow), never diagonal, and stop short of
     // the label text. Day/night renders are swapped by sun position.
     const sceneBase = new URL(".", import.meta.url);
-    this._sceneDay = new URL("home-scene-day.png", sceneBase).href;
-    this._sceneNight = new URL("home-scene-night.png", sceneBase).href;
+    this._sceneDay = new URL("home-scene-day_2.png", sceneBase).href;
+    this._sceneNight = new URL("home-scene-night_2.png", sceneBase).href;
     const GAP = 5; // % gap so the line ends before the label text
 
     // ex,ey = point on the render. lx,ly = label position.
