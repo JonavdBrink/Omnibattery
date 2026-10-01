@@ -1,5 +1,9 @@
 {
   "issues": {
+    "excluded_device_ev_type": {
+      "title": "Marca el teu carregador de VE entre els dispositius exclosos",
+      "description": "El nou diagrama de fluxos d'energia (activa'l amb el botó de la capçalera de la targeta de flux) dibuixa els carregadors de VE al seu propi cable, al costat del cotxe. Omnibattery no pot saber quin dispositiu exclòs és el carregador, així que fins que el marquis la seva potència es mostra al cable dels altres dispositius exclosos (la unitat exterior) i el cable del VE queda buit. Obre Opcions → Dispositius exclosos i torna a desar els dispositius, marcant \"Carregador de VE\" al carregador (deixa-ho sense marcar als altres). Només afecta com es dibuixa el diagrama, no el control de la bateria. L'avís desapareix en desar els dispositius."
+    },
     "battery_not_delivering": {
       "title": "La bateria {battery} no lliura potència",
       "description": "{battery} fa {minutes} minuts que accepta ordres de càrrega/descàrrega sense lliurar potència ({reason}). Omnibattery la manté fora del repartiment i la reintenta cada {cooldown} minuts, de manera que la resta de la flota cobreix la casa mentrestant. Cal revisar la bateria, el seu enllaç Modbus o el pont que tingui al davant: comprova que no estigui en espera sota el control de la seva pròpia aplicació i que la connexió no estigui saturada. Activar i desactivar el Control Manual d'aquesta bateria sovint la recupera."
@@ -307,6 +311,7 @@
           "dynamic_power_control": "El dispositiu té control dinàmic de potència",
           "cover_home_when_active": "Cobrir la llar mentre el dispositiu està actiu",
           "ev_charger_no_telemetry": "Carregador VE sense telemetria de potència",
+          "is_ev_charger": "Carregador de VE (només diagrama de flux)",
           "remaining_demand_sensor": "Demanda restant prevista (kWh)",
           "remaining_demand_presence_sensor": "Entitat de presència per a la demanda restant (opcional)"
         },
@@ -318,6 +323,7 @@
           "dynamic_power_control": "Activa-ho per a dispositius que ajusten automàticament la demanda mitjançant el comptador de xarxa. Amb un sensor d'activitat, Omnibattery cedeix abans que aparegui potència; sense aquest sensor, reacciona al sensor de potència. Després utilitza l'excedent sobrant real.",
           "cover_home_when_active": "Requereix Excedent Solar i un sensor de producció solar. La bateria pot cobrir el consum propi de la llar mentre aquest dispositiu està actiu; només queda exclosa la part de xarxa del dispositiu.",
           "ev_charger_no_telemetry": "✓ MARCAT = Utilitza el sensor de dispositiu actiu / càrrega del VE en lloc de telemetria numèrica. Les configuracions existents que van posar aquest sensor al camp de potència continuen funcionant. En detectar càrrega, la bateria s'atura 5 minuts; després només pot carregar amb excedent solar i mai descarrega per al VE.",
+          "is_ev_charger": "Marca-ho si aquest dispositiu és un carregador de vehicle elèctric. Només ho fa servir el diagrama animat de fluxos d'energia, per dibuixar el dispositiu al cable del carregador de VE en lloc del cable de dispositius exclosos. No canvia com la bateria gestiona el dispositiu.",
           "remaining_demand_sensor": "Opcional. Sensor que indica l'energia (kWh) que aquest dispositiu encara espera consumir avui, per exemple sensor.evcc_[punt_de_carrega]_charge_remaining_energy. La càrrega predictiva reserva aquesta part de la previsió solar restant per al dispositiu en lloc de suposar que la bateria la rep. Només s'utilitza si 'El consum està inclòs al sensor de consum de la llar' està marcat. Els dispositius marcats com a 'Carregador VE sense telemetria de potència' s'ometen: la seva energia ja és a la previsió de consum, així que reservar-la la comptaria dues vegades.",
           "remaining_demand_presence_sensor": "Compta la demanda restant prevista només mentre aquesta entitat indiqui que el dispositiu hi és: on, true, home, connected, plugged o present. Deixa-la buida per comptar-la sempre. Apunta-la a l'entitat connected del carregador si la font continua informant demanda sense res endollat: evcc informa l'energia fins a l'objectiu de SOC del vehicle, hi hagi cotxe o no, i reservar sol per a un cotxe absent l'estalvia a la bateria sense cap finalitat. Una entitat no disponible o desconeguda compta com a absent, de manera que un sensor avariat deixa de reservar en comptes de reservar per a un dispositiu que potser no hi és."
         }
@@ -1022,6 +1028,7 @@
           "dynamic_power_control": "El dispositiu té control dinàmic de potència",
           "cover_home_when_active": "Cobrir la llar mentre el dispositiu està actiu",
           "ev_charger_no_telemetry": "Carregador VE sense telemetria de potència",
+          "is_ev_charger": "Carregador de VE (només diagrama de flux)",
           "remaining_demand_sensor": "Demanda restant prevista (kWh)",
           "remaining_demand_presence_sensor": "Entitat de presència per a la demanda restant (opcional)"
         },
@@ -1033,6 +1040,7 @@
           "dynamic_power_control": "Activa-ho per a dispositius que ajusten automàticament la demanda mitjançant el comptador de xarxa. Amb un sensor d'activitat, Omnibattery cedeix abans que aparegui potència; sense aquest sensor, reacciona al sensor de potència. Després utilitza l'excedent sobrant real.",
           "cover_home_when_active": "Requereix Excedent Solar i un sensor de producció solar. La bateria pot cobrir el consum propi de la llar mentre aquest dispositiu està actiu; només queda exclosa la part de xarxa del dispositiu.",
           "ev_charger_no_telemetry": "✓ MARCAT = Utilitza el sensor de dispositiu actiu / càrrega del VE en lloc de telemetria numèrica. Les configuracions existents que van posar aquest sensor al camp de potència continuen funcionant. En detectar càrrega, la bateria s'atura 5 minuts; després només pot carregar amb excedent solar i mai descarrega per al VE.",
+          "is_ev_charger": "Marca-ho si aquest dispositiu és un carregador de vehicle elèctric. Només ho fa servir el diagrama animat de fluxos d'energia, per dibuixar el dispositiu al cable del carregador de VE en lloc del cable de dispositius exclosos. No canvia com la bateria gestiona el dispositiu.",
           "remaining_demand_sensor": "Opcional. Sensor que indica l'energia (kWh) que aquest dispositiu encara espera consumir avui, per exemple sensor.evcc_[punt_de_carrega]_charge_remaining_energy. La càrrega predictiva reserva aquesta part de la previsió solar restant per al dispositiu en lloc de suposar que la bateria la rep. Només s'utilitza si 'El consum està inclòs al sensor de consum de la llar' està marcat. Els dispositius marcats com a 'Carregador VE sense telemetria de potència' s'ometen: la seva energia ja és a la previsió de consum, així que reservar-la la comptaria dues vegades.",
           "remaining_demand_presence_sensor": "Compta la demanda restant prevista només mentre aquesta entitat indiqui que el dispositiu hi és: on, true, home, connected, plugged o present. Deixa-la buida per comptar-la sempre. Apunta-la a l'entitat connected del carregador si la font continua informant demanda sense res endollat: evcc informa l'energia fins a l'objectiu de SOC del vehicle, hi hagi cotxe o no, i reservar sol per a un cotxe absent l'estalvia a la bateria sense cap finalitat. Una entitat no disponible o desconeguda compta com a absent, de manera que un sensor avariat deixa de reservar en comptes de reservar per a un dispositiu que potser no hi és."
         }

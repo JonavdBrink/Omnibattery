@@ -52,6 +52,9 @@ def test_excluded_devices_panel_config_survives_disabled_switch():
             "included_in_consumption": False,
             "enabled": True,
             "enabled_entity": None,
+            "is_ev_charger": False,
+            "activity_sensor": None,
+            "ev_charger_no_telemetry": False,
         }
     ]
 
@@ -72,8 +75,52 @@ def test_excluded_devices_panel_config_resolves_live_switch_entity():
             "included_in_consumption": True,
             "enabled": True,
             "enabled_entity": entity_id,
+            "is_ev_charger": False,
+            "activity_sensor": None,
+            "ev_charger_no_telemetry": False,
         }
     ]
+
+
+def test_excluded_devices_panel_config_legacy_no_telemetry_activity_sensor():
+    """Legacy no-telemetry chargers kept their state sensor in power_sensor."""
+    result = _excluded_devices_panel_config(
+        {
+            "excluded_devices": [
+                {
+                    "power_sensor": "sensor.wallbox_status",
+                    "ev_charger_no_telemetry": True,
+                    "is_ev_charger": True,
+                }
+            ]
+        },
+        _EntityRegistry({}),
+    )
+
+    assert result[0]["is_ev_charger"] is True
+    assert result[0]["activity_sensor"] == "sensor.wallbox_status"
+
+
+def test_ev_charger_type_notice_until_every_device_is_resaved(monkeypatch):
+    """The one-time Repair stays only while a device predates the EV field."""
+    import custom_components.omnibattery as integration
+
+    calls = []
+    monkeypatch.setattr(
+        integration.ir, "async_create_issue", lambda *a, **k: calls.append("create")
+    )
+    monkeypatch.setattr(
+        integration.ir, "async_delete_issue", lambda *a, **k: calls.append("delete")
+    )
+
+    def check(devices):
+        entry = SimpleNamespace(entry_id="e1", data={"excluded_devices": devices})
+        integration._check_ev_charger_type_notice(None, entry)
+        return calls.pop()
+
+    assert check([{"power_sensor": "sensor.a"}, {"is_ev_charger": True}]) == "create"
+    assert check([{"is_ev_charger": False}, {"is_ev_charger": True}]) == "delete"
+    assert check([]) == "delete"
 
 
 def test_panel_solar_capability_excludes_max_ac():

@@ -351,9 +351,41 @@ def _excluded_devices_panel_config(data: dict, ent_reg) -> list[dict]:
                 ),
                 "enabled": device.get("enabled", True),
                 "enabled_entity": enabled_entity,
+                "is_ev_charger": device.get("is_ev_charger", False),
+                # No-telemetry chargers animate from their state sensor;
+                # legacy entries stored it in power_sensor.
+                "activity_sensor": device.get("activity_sensor")
+                or (
+                    device.get("power_sensor")
+                    if device.get("ev_charger_no_telemetry")
+                    else None
+                ),
+                "ev_charger_no_telemetry": device.get("ev_charger_no_telemetry", False),
             }
         )
     return devices
+
+
+def _check_ev_charger_type_notice(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ask once to mark EV chargers among excluded devices (flow diagram only).
+
+    Devices saved before the field existed lack the key; re-saving the excluded
+    devices in the options flow writes it (True or False) and clears the issue.
+    """
+    issue_id = f"excluded_device_ev_type_{entry.entry_id}"
+    if any("is_ev_charger" not in d for d in entry.data.get("excluded_devices", [])):
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            is_persistent=True,
+            issue_domain=DOMAIN,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="excluded_device_ev_type",
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
 
 
 def _has_battery_reported_solar(coordinators) -> bool:
@@ -10915,6 +10947,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # This is advisory only and is evaluated at setup and after option updates,
     # independently of grid-sensor health or the control loop.
     controller._check_solar_forecast_migration()
+    _check_ev_charger_type_notice(hass, entry)
     predictive_configured = CONF_ENABLE_PREDICTIVE_CHARGING in entry.data
 
     from .tracking.consumption_tracker import ConsumptionTracker
