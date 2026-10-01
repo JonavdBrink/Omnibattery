@@ -413,3 +413,74 @@ async def test_a_written_off_slot_is_purged_not_merely_dropped():
         or s.get("battery_soc_pack_2", "missing") is None
         for s in seen
     )
+
+
+# --- runtime pack changes: the BMS online mask (issue #526) -----------------
+
+
+def _polled(driver):
+    return {k for g in driver.read_groups for k in g.keys}
+
+
+async def _poll_into(driver, data):
+    """One coordinator-shaped poll of every read group, merged like coordinator.data."""
+    for group in driver.read_groups:
+        snapshot = await driver.read_telemetry(list(group.keys))
+        for key, value in snapshot.items():
+            if key in PACK_SOC_KEYS and value is not None:
+                value = value * 0.1
+            data[key] = value
+
+
+@pytest.mark.asyncio
+async def test_a_pack_removed_after_the_probe_leaves_the_floor_and_comes_back():
+    """#526: pack 7 pulled off a running seven-pack Venus D kept its slot in the
+    poll reading 0, and min(pack_soc) held the battery at 72 % out of discharge
+    until a reload. The mask (32110) followed the hardware: 127 -> 63."""
+    reads = {32104: 72, 32110: 127}
+    reads.update({_pack_register(n): 720 for n in range(1, 8)})
+    driver = _driver(reads)
+    data = {}
+    await _poll_into(driver, data)
+    assert set(PACK_SOC_KEYS) <= _polled(driver)
+
+    reads[32110] = 63
+    reads[_pack_register(7)] = 0
+    await _poll_into(driver, data)
+    await _poll_into(driver, data)
+
+    assert data["battery_soc_pack_7"] is None
+    assert "battery_soc_pack_7" not in _polled(driver)
+    assert "max_cell_voltage_pack_7" not in _polled(driver)
+    assert _dischargeable(data, min_soc=12)
+
+    # Plugged back in: the slot is polled again without a reload.
+    reads[32110] = 127
+    reads[_pack_register(7)] = 650
+    await _poll_into(driver, data)
+    await _poll_into(driver, data)
+    assert "battery_soc_pack_7" in _polled(driver)
+    assert data["battery_soc_pack_7"] == pytest.approx(65.0)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_or_zero_mask_read_keeps_the_last_known_packs():
+    reads = {32104: 72, 32110: 3}
+    reads.update({_pack_register(n): 720 for n in (1, 2)})
+    driver = _driver(reads)
+    await _poll_into(driver, {})
+    assert driver._packs & set(PACK_SOC_KEYS) == {"battery_soc_pack_1", "battery_soc_pack_2"}
+
+    for bad in (None, 0):
+        reads[32110] = bad
+        await _poll_into(driver, {})
+        assert driver._packs & set(PACK_SOC_KEYS) == {
+            "battery_soc_pack_1", "battery_soc_pack_2",
+        }
+
+
+@pytest.mark.asyncio
+async def test_the_mask_is_venus_a_d_only():
+    driver = _driver({37005: 80}, version="v3")
+    assert "pack_online_mask" not in _polled(driver)
+    assert "pack_online_mask" not in {d["key"] for d in driver.sensor_definitions}

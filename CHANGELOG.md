@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Re-evaluate button no longer fails with a template-recalculated Nordpool sensor**: `raw_today`/`raw_tomorrow` start/end rendered as text crashed with `'>' not supported between 'str' and 'datetime'`; they are now parsed as datetimes.
+- **Venus A/D: a pack removed or added at runtime no longer needs a reload**: a removed slot kept reading 0 %, blocking discharge on a battery at 72 %. The BMS online-pack mask (32110) now decides which packs are polled (#526). Thanks to @sphings79.
 
 ## [1.5.0b5] - 2026-09-28
 

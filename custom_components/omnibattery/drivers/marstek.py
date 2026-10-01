@@ -29,6 +29,8 @@ from ..const import (
     MESSAGE_WAIT_MS_RS485_GATEWAY,
     PACK_MAX_CELL_KEYS,
     PACK_MIN_CELL_KEYS,
+    PACK_ONLINE_MASK_DEFINITION,
+    PACK_ONLINE_MASK_KEY,
     PACK_SOC_KEYS,
     READ_TIMEOUT_S,
     REGISTER_MAP,
@@ -164,6 +166,8 @@ def _load_definitions(version: str) -> dict[str, list[dict]]:
         switch = SWITCH_DEFINITIONS
         binary_sensor = BINARY_SENSOR_DEFINITIONS
         button = BUTTON_DEFINITIONS
+    # Polled but entity-less: read only by the driver itself.
+    internal = [PACK_ONLINE_MASK_DEFINITION] if version in ("vA", "vD") else []
 
     # Venus D number definitions contain mutable slider metadata.  Each Venus D
     # driver needs its own copy because its maxima can change after EMS firmware
@@ -184,6 +188,7 @@ def _load_definitions(version: str) -> dict[str, list[dict]]:
         + definitions["select"]
         + definitions["switch"]
         + definitions["binary_sensor"]
+        + internal
     )
     return definitions
 
@@ -710,6 +715,42 @@ class MarstekModbusDriver(BatteryDriver):
             len(found), ", ".join(found) or "none",
         )
 
+    def _apply_pack_mask(self, mask: int, snapshot: dict) -> None:
+        """Let the BMS online mask (32110) decide which slots exist (issue #526).
+
+        The probe decides once, at start-up, and a pack removed after that kept
+        its slot in the poll reading a flat 0 — min(pack_soc) then judged a
+        battery at 72 % to be empty and it was never given a discharge setpoint
+        again until a reload. The mask follows the hardware both ways, so once
+        it answers it replaces the probe: an offline slot leaves the read
+        groups with its stale value purged to None (the same purge _learn_pack
+        does), a slot that comes back is polled again.
+        """
+        # ponytail: a slot back online also resumes its cell-voltage reads, even
+        # if the probe had written those registers off; matters only on a Venus A
+        # whose 34005/34006 do not answer, which nobody has reported.
+        online = frozenset(
+            k for k in _SLOT_KEYS
+            if k in self._telemetry_index
+            and mask >> (int(k.rsplit("_", 1)[1]) - 1) & 1
+        )
+        if online == self._packs and not self._pack_probes_left:
+            return
+        offline = _SLOT_KEYS - online
+        for gone in offline & self._telemetry_index.keys():
+            snapshot[gone] = None
+        self._packs = set(online)
+        self._pack_probes_left.clear()
+        self._read_groups = [
+            g for g in self._build_read_groups() if offline.isdisjoint(g.keys)
+        ]
+        found = sorted(online & frozenset(PACK_SOC_KEYS))
+        _LOGGER.info(
+            "[%s] BMS online pack mask %d: %d present (%s)",
+            getattr(self._client, "host", "?"), mask,
+            len(found), ", ".join(found) or "none",
+        )
+
     @property
     def read_groups(self) -> list[ReadGroup]:
         return self._read_groups
@@ -787,6 +828,10 @@ class MarstekModbusDriver(BatteryDriver):
 
         if "battery_soc" in snapshot:
             self._last_aggregate_soc = snapshot["battery_soc"]
+        # 0 is no reading: a battery that answers has at least one pack. A failed
+        # read leaves the key out, so the last known set stands.
+        if snapshot.get(PACK_ONLINE_MASK_KEY):
+            self._apply_pack_mask(int(snapshot[PACK_ONLINE_MASK_KEY]), snapshot)
         for key in wanted:
             if key in self._pack_probes_left:
                 self._learn_pack(key, snapshot.get(key), snapshot)

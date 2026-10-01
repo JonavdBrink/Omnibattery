@@ -570,3 +570,21 @@ REGISTER_BLOCKS_VA_PACK_CELLS = [
     }
     for n in range(1, 8)
 ]
+
+# --- BMS online-pack mask (issue #526) ---------------------------------------
+# 32110 carries one bit per pack slot, bit n = slot n+1, and follows the hardware
+# at runtime: pulling pack 7 off a seven-pack Venus D took it from 127 to 63
+# (and 32109, the pack count, from 7 to 6). The start-up probe cannot see that —
+# a removed slot keeps reading a flat 0, which min(pack_soc) then takes as an
+# empty battery — so the driver lets this mask decide which slots are polled.
+# Polled as an internal key, with no entity: it only feeds the driver.
+# Confirmed on Venus D (#526); untested on Venus A, where a read that never
+# answers just leaves the probe in charge as before.
+PACK_ONLINE_MASK_KEY = "pack_online_mask"
+PACK_ONLINE_MASK_DEFINITION = {
+    "name": "BMS Online Pack Mask",
+    "register": 32110,
+    "key": PACK_ONLINE_MASK_KEY,
+    "data_type": "uint16",
+    "scan_interval": "low",
+}
