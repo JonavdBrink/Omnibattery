@@ -1,5 +1,9 @@
 {
   "issues": {
+    "excluded_device_ev_type": {
+      "title": "Indiquez votre chargeur de VE parmi les appareils exclus",
+      "description": "Le nouveau diagramme des flux d'énergie (activez-le avec le bouton dans l'en-tête de la carte de flux) dessine les chargeurs de VE sur leur propre câble, à côté de la voiture. Omnibattery ne peut pas savoir quel appareil exclu est le chargeur : tant que vous ne l'indiquez pas, sa puissance s'affiche sur le câble des autres appareils exclus (l'unité extérieure) et le câble du VE reste vide. Ouvrez Options → Appareils exclus et enregistrez à nouveau vos appareils en cochant « Chargeur de VE » sur le chargeur (laissez-le décoché sur les autres). Cela n'affecte que l'affichage du diagramme, pas le contrôle de la batterie. L'avis disparaît une fois les appareils enregistrés."
+    },
     "battery_not_delivering": {
       "title": "La batterie {battery} ne délivre pas de puissance",
       "description": "{battery} accepte des ordres de charge/décharge depuis {minutes} minutes sans délivrer de puissance ({reason}). Omnibattery la garde hors de la répartition et la réessaie toutes les {cooldown} minutes, le reste du parc couvre donc la maison entre-temps. La batterie elle-même, sa liaison Modbus ou la passerelle en amont demande une vérification : contrôlez qu'elle n'est pas en veille sous le contrôle de sa propre application et que la connexion n'est pas saturée. Activer puis désactiver le contrôle manuel de cette batterie la rétablit souvent."
@@ -307,6 +311,7 @@
           "dynamic_power_control": "L'appareil a un contrôle dynamique de puissance",
           "cover_home_when_active": "Couvrir la maison pendant que l'appareil est actif",
           "ev_charger_no_telemetry": "Chargeur VE sans télémétrie de puissance",
+          "is_ev_charger": "Chargeur de VE (diagramme de flux uniquement)",
           "remaining_demand_sensor": "Demande restante prévue (kWh)",
           "remaining_demand_presence_sensor": "Entité de présence pour la demande restante (facultatif)"
         },
@@ -318,6 +323,7 @@
           "dynamic_power_control": "À activer pour les appareils qui ajustent automatiquement leur demande à partir du compteur réseau. Avec un capteur d'activité, Omnibattery cède avant l'apparition de puissance ; sinon il réagit au capteur de puissance. Il utilise ensuite uniquement le surplus réellement restant.",
           "cover_home_when_active": "Nécessite Surplus Solaire et un capteur de production solaire. La batterie peut couvrir la consommation propre de la maison pendant que cet appareil est actif ; seule la part réseau de l'appareil reste exclue.",
           "ev_charger_no_telemetry": "✓ COCHÉ = Utilise le capteur appareil actif / charge VE au lieu d'une télémétrie numérique. Les configurations existantes ayant placé ce capteur dans le champ de puissance continuent de fonctionner. À la détection de charge, la batterie s'arrête 5 minutes ; ensuite elle charge seulement avec le surplus solaire et ne se décharge jamais pour le VE.",
+          "is_ev_charger": "Cochez si cet appareil est un chargeur de véhicule électrique. Utilisé uniquement par le diagramme animé des flux d'énergie, pour dessiner l'appareil sur le câble du chargeur de VE au lieu du câble des appareils exclus. Ne change pas la façon dont la batterie gère l'appareil.",
           "remaining_demand_sensor": "Facultatif. Capteur indiquant l'énergie (kWh) que cet appareil compte encore consommer aujourd'hui, par exemple sensor.evcc_[point_de_charge]_charge_remaining_energy. La charge prédictive réserve alors cette part de la prévision solaire restante pour l'appareil au lieu de supposer que la batterie la reçoit. Utilisé uniquement si « La consommation est incluse dans le capteur de consommation domestique » est coché. Les appareils marqués « Chargeur VE sans télémétrie de puissance » sont ignorés : leur énergie figure déjà dans la prévision de consommation, la réserver la compterait deux fois.",
           "remaining_demand_presence_sensor": "Ne compter la demande restante attendue que tant que cette entité signale l'appareil comme présent : on, true, home, connected, plugged ou present. Laisser vide pour toujours la compter. Pointez-la vers l'entité connected de votre borne si la source continue d'annoncer une demande alors que rien n'est branché : evcc annonce l'énergie jusqu'à l'objectif de SOC du véhicule, qu'une voiture soit là ou non, et réserver du solaire pour une voiture absente le retire à la batterie pour rien. Une entité indisponible ou inconnue compte comme absente, afin qu'un capteur en panne cesse de réserver plutôt que de réserver pour un appareil peut-être absent."
         }
@@ -1026,6 +1032,7 @@
           "dynamic_power_control": "L'appareil a un contrôle dynamique de puissance",
           "cover_home_when_active": "Couvrir la maison pendant que l'appareil est actif",
           "ev_charger_no_telemetry": "Chargeur VE sans télémétrie de puissance",
+          "is_ev_charger": "Chargeur de VE (diagramme de flux uniquement)",
           "remaining_demand_sensor": "Demande restante prévue (kWh)",
           "remaining_demand_presence_sensor": "Entité de présence pour la demande restante (facultatif)"
         },
@@ -1037,6 +1044,7 @@
           "dynamic_power_control": "À activer pour les appareils qui ajustent automatiquement leur demande à partir du compteur réseau. Avec un capteur d'activité, Omnibattery cède avant l'apparition de puissance ; sinon il réagit au capteur de puissance. Il utilise ensuite uniquement le surplus réellement restant.",
           "cover_home_when_active": "Nécessite Surplus Solaire et un capteur de production solaire. La batterie peut couvrir la consommation propre de la maison pendant que cet appareil est actif ; seule la part réseau de l'appareil reste exclue.",
           "ev_charger_no_telemetry": "✓ COCHÉ = Utilise le capteur appareil actif / charge VE au lieu d'une télémétrie numérique. Les configurations existantes ayant placé ce capteur dans le champ de puissance continuent de fonctionner. À la détection de charge, la batterie s'arrête 5 minutes ; ensuite elle charge seulement avec le surplus solaire et ne se décharge jamais pour le VE.",
+          "is_ev_charger": "Cochez si cet appareil est un chargeur de véhicule électrique. Utilisé uniquement par le diagramme animé des flux d'énergie, pour dessiner l'appareil sur le câble du chargeur de VE au lieu du câble des appareils exclus. Ne change pas la façon dont la batterie gère l'appareil.",
           "remaining_demand_sensor": "Facultatif. Capteur indiquant l'énergie (kWh) que cet appareil compte encore consommer aujourd'hui, par exemple sensor.evcc_[point_de_charge]_charge_remaining_energy. La charge prédictive réserve alors cette part de la prévision solaire restante pour l'appareil au lieu de supposer que la batterie la reçoit. Utilisé uniquement si « La consommation est incluse dans le capteur de consommation domestique » est coché. Les appareils marqués « Chargeur VE sans télémétrie de puissance » sont ignorés : leur énergie figure déjà dans la prévision de consommation, la réserver la compterait deux fois.",
           "remaining_demand_presence_sensor": "Ne compter la demande restante attendue que tant que cette entité signale l'appareil comme présent : on, true, home, connected, plugged ou present. Laisser vide pour toujours la compter. Pointez-la vers l'entité connected de votre borne si la source continue d'annoncer une demande alors que rien n'est branché : evcc annonce l'énergie jusqu'à l'objectif de SOC du véhicule, qu'une voiture soit là ou non, et réserver du solaire pour une voiture absente le retire à la batterie pour rien. Une entité indisponible ou inconnue compte comme absente, afin qu'un capteur en panne cesse de réserver plutôt que de réserver pour un appareil peut-être absent."
         }

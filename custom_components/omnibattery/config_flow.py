@@ -2379,6 +2379,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 "dynamic_power_control": dynamic_power_control,
                 "cover_home_when_active": user_input.get("cover_home_when_active", False),
                 "ev_charger_no_telemetry": ev_no_telemetry,
+                "is_ev_charger": user_input.get("is_ev_charger", False),
             }
             self.excluded_devices.append(excluded_device)
 
@@ -2404,6 +2405,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     vol.Optional("dynamic_power_control", default=False): bool,
                     vol.Optional("cover_home_when_active", default=False): bool,
                     vol.Optional("ev_charger_no_telemetry", default=False): bool,
+                    vol.Optional("is_ev_charger", default=False): bool,
                     vol.Optional("remaining_demand_sensor"):
                         EntitySelector(
                             # No device_class filter: _read_sensor_kwh_opt accepts any
@@ -5013,6 +5015,7 @@ class OptionsFlowHandler(OptionsFlow):
                 "dynamic_power_control": dynamic_power_control,
                 "cover_home_when_active": user_input.get("cover_home_when_active", False),
                 "ev_charger_no_telemetry": ev_no_telemetry,
+                "is_ev_charger": user_input.get("is_ev_charger", False),
             }
             # The Enabled switch and the Exclusion % slider write straight into
             # the stored record and have no field on this form. Lay the form
@@ -5050,6 +5053,7 @@ class OptionsFlowHandler(OptionsFlow):
             default_dynamic_power_control = current_device.get("dynamic_power_control", False)
             default_cover_home = current_device.get("cover_home_when_active", False)
             default_ev_no_telemetry = current_device.get("ev_charger_no_telemetry", False)
+            default_is_ev_charger = current_device.get("is_ev_charger", False)
             default_activity_sensor = current_device.get("activity_sensor", "")
             default_remaining_demand = current_device.get("remaining_demand_sensor") or ""
             default_remaining_presence = (
@@ -5066,6 +5070,7 @@ class OptionsFlowHandler(OptionsFlow):
             default_dynamic_power_control = False
             default_cover_home = False
             default_ev_no_telemetry = False
+            default_is_ev_charger = False
             default_activity_sensor = ""
             default_remaining_demand = ""
             default_remaining_presence = ""
@@ -5106,6 +5111,7 @@ class OptionsFlowHandler(OptionsFlow):
                     vol.Optional("dynamic_power_control", default=default_dynamic_power_control): bool,
                     vol.Optional("cover_home_when_active", default=default_cover_home): bool,
                     vol.Optional("ev_charger_no_telemetry", default=default_ev_no_telemetry): bool,
+                    vol.Optional("is_ev_charger", default=default_is_ev_charger): bool,
                     remaining_demand_field:
                         EntitySelector(
                             # No device_class filter: _read_sensor_kwh_opt accepts any

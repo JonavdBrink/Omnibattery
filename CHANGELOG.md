@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **New energy-flow diagram drawn on the house's cables**, switchable with the old one from the card header (choice remembered per browser). EV chargers get their own cable: mark them with the new **EV charger** option on each excluded device (diagram only, no control change); a one-time Repair asks existing setups to do so.
+
 ### Fixed
 
 - **Re-evaluate button no longer fails with a template-recalculated Nordpool sensor**: `raw_today`/`raw_tomorrow` start/end rendered as text crashed with `'>' not supported between 'str' and 'datetime'`; they are now parsed as datetimes.

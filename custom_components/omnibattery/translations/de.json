@@ -1,5 +1,9 @@
 {
   "issues": {
+    "excluded_device_ev_type": {
+      "title": "E-Auto-Ladegerät unter den ausgeschlossenen Geräten markieren",
+      "description": "Das neue Energieflussdiagramm (über die Schaltfläche im Kopf der Fluss-Karte einschalten) zeichnet E-Auto-Ladegeräte auf einer eigenen Leitung neben dem Auto. Omnibattery kann nicht erkennen, welches ausgeschlossene Gerät das Ladegerät ist; bis du es markierst, erscheint seine Leistung auf der Leitung der übrigen ausgeschlossenen Geräte (Außeneinheit) und die E-Auto-Leitung bleibt leer. Öffne Optionen → Ausgeschlossene Geräte und speichere deine Geräte erneut; aktiviere dabei \"E-Auto-Ladegerät\" beim Ladegerät (bei den anderen deaktiviert lassen). Betrifft nur die Darstellung des Diagramms, nicht die Batteriesteuerung. Der Hinweis verschwindet, sobald die Geräte gespeichert sind."
+    },
     "battery_not_delivering": {
       "title": "Batterie {battery} liefert keine Leistung",
       "description": "{battery} nimmt seit {minutes} Minuten Lade-/Entladebefehle an, ohne Leistung zu liefern ({reason}). Omnibattery hält sie aus der Verteilung heraus und versucht es alle {cooldown} Minuten erneut, sodass der Rest der Flotte das Haus in der Zwischenzeit versorgt. Die Batterie selbst, ihre Modbus-Verbindung oder die Bridge davor braucht Aufmerksamkeit: Prüfe, ob sie nicht unter der Kontrolle ihrer eigenen App im Standby steht und ob die Verbindung nicht überlastet ist. Die manuelle Batteriesteuerung für diese Batterie ein- und wieder auszuschalten stellt sie oft wieder her."
@@ -307,6 +311,7 @@
           "dynamic_power_control": "Gerät hat dynamische Leistungsregelung",
           "cover_home_when_active": "Hausverbrauch decken, während das Gerät aktiv ist",
           "ev_charger_no_telemetry": "EV-Ladestation ohne Leistungstelemetrie",
+          "is_ev_charger": "E-Auto-Ladegerät (nur Flussdiagramm)",
           "remaining_demand_sensor": "Erwarteter Restbedarf (kWh)",
           "remaining_demand_presence_sensor": "Anwesenheits-Entität für den Restbedarf (optional)"
         },
@@ -318,6 +323,7 @@
           "dynamic_power_control": "Für Geräte aktivieren, die ihren Bedarf über den Netzzähler automatisch regeln. Mit Aktivitätssensor gibt Omnibattery Vorrang, bevor Leistung erscheint; andernfalls reagiert es auf den Leistungssensor. Danach wird nur der tatsächlich verbleibende Überschuss genutzt.",
           "cover_home_when_active": "Erfordert Solarüberschuss und einen Solarleistungssensor. Die Batterie darf den eigenen Hausverbrauch decken, während dieses Gerät aktiv ist; nur der Netzanteil des Geräts bleibt ausgeschlossen.",
           "ev_charger_no_telemetry": "✓ AKTIVIERT = Nutzt den Sensor Gerät aktiv / EV-Ladestatus statt numerischer Telemetrie. Bestehende Konfigurationen mit diesem Sensor im Leistungsfeld funktionieren weiter. Bei erkanntem Laden pausiert die Batterie 5 Minuten; danach lädt sie nur mit Solarüberschuss und entlädt nie für das EV.",
+          "is_ev_charger": "Aktivieren, wenn dieses Gerät ein Ladegerät für Elektrofahrzeuge ist. Wird nur vom animierten Energieflussdiagramm verwendet, um das Gerät auf der Leitung des E-Auto-Ladegeräts statt auf der Leitung der ausgeschlossenen Geräte darzustellen. Ändert nicht, wie die Batterie das Gerät steuert.",
           "remaining_demand_sensor": "Optional. Sensor mit der Energie (kWh), die dieses Gerät heute noch verbrauchen will, zum Beispiel sensor.evcc_[ladepunkt]_charge_remaining_energy. Die vorausschauende Ladung reserviert dann diesen Anteil der verbleibenden Solarprognose für das Gerät, statt anzunehmen, dass die Batterie ihn erhält. Wird nur verwendet, wenn 'Verbrauch ist im Hausverbrauchssensor enthalten' aktiviert ist. Geräte mit 'EV-Ladestation ohne Leistungstelemetrie' werden übersprungen: Ihre Energie steckt bereits in der Verbrauchsprognose, eine Reservierung würde sie doppelt zählen.",
           "remaining_demand_presence_sensor": "Den erwarteten Restbedarf nur zählen, solange diese Entität das Gerät als anwesend meldet: on, true, home, connected, plugged oder present. Leer lassen heißt immer zählen. Auf die Connected-Entität der Wallbox richten, wenn die Quelle weiter einen Bedarf meldet, obwohl nichts angesteckt ist: evcc meldet die Energie bis zum SOC-Ziel des Fahrzeugs, unabhängig davon, ob ein Auto angesteckt ist, und für ein abwesendes Auto reservierte Sonne fehlt der Batterie ohne Nutzen. Eine nicht verfügbare oder unbekannte Entität gilt als abwesend, damit ein defekter Sensor das Reservieren beendet, statt für ein womöglich abwesendes Gerät zu reservieren."
         }
@@ -1022,6 +1028,7 @@
           "dynamic_power_control": "Gerät hat dynamische Leistungsregelung",
           "cover_home_when_active": "Hausverbrauch decken, während das Gerät aktiv ist",
           "ev_charger_no_telemetry": "EV-Ladestation ohne Leistungstelemetrie",
+          "is_ev_charger": "E-Auto-Ladegerät (nur Flussdiagramm)",
           "remaining_demand_sensor": "Erwarteter Restbedarf (kWh)",
           "remaining_demand_presence_sensor": "Anwesenheits-Entität für den Restbedarf (optional)"
         },
@@ -1033,6 +1040,7 @@
           "dynamic_power_control": "Für Geräte aktivieren, die ihren Bedarf über den Netzzähler automatisch regeln. Mit Aktivitätssensor gibt Omnibattery Vorrang, bevor Leistung erscheint; andernfalls reagiert es auf den Leistungssensor. Danach wird nur der tatsächlich verbleibende Überschuss genutzt.",
           "cover_home_when_active": "Erfordert Solarüberschuss und einen Solarleistungssensor. Die Batterie darf den eigenen Hausverbrauch decken, während dieses Gerät aktiv ist; nur der Netzanteil des Geräts bleibt ausgeschlossen.",
           "ev_charger_no_telemetry": "✓ AKTIVIERT = Nutzt den Sensor Gerät aktiv / EV-Ladestatus statt numerischer Telemetrie. Bestehende Konfigurationen mit diesem Sensor im Leistungsfeld funktionieren weiter. Bei erkanntem Laden pausiert die Batterie 5 Minuten; danach lädt sie nur mit Solarüberschuss und entlädt nie für das EV.",
+          "is_ev_charger": "Aktivieren, wenn dieses Gerät ein Ladegerät für Elektrofahrzeuge ist. Wird nur vom animierten Energieflussdiagramm verwendet, um das Gerät auf der Leitung des E-Auto-Ladegeräts statt auf der Leitung der ausgeschlossenen Geräte darzustellen. Ändert nicht, wie die Batterie das Gerät steuert.",
           "remaining_demand_sensor": "Optional. Sensor mit der Energie (kWh), die dieses Gerät heute noch verbrauchen will, zum Beispiel sensor.evcc_[ladepunkt]_charge_remaining_energy. Die vorausschauende Ladung reserviert dann diesen Anteil der verbleibenden Solarprognose für das Gerät, statt anzunehmen, dass die Batterie ihn erhält. Wird nur verwendet, wenn 'Verbrauch ist im Hausverbrauchssensor enthalten' aktiviert ist. Geräte mit 'EV-Ladestation ohne Leistungstelemetrie' werden übersprungen: Ihre Energie steckt bereits in der Verbrauchsprognose, eine Reservierung würde sie doppelt zählen.",
           "remaining_demand_presence_sensor": "Den erwarteten Restbedarf nur zählen, solange diese Entität das Gerät als anwesend meldet: on, true, home, connected, plugged oder present. Leer lassen heißt immer zählen. Auf die Connected-Entität der Wallbox richten, wenn die Quelle weiter einen Bedarf meldet, obwohl nichts angesteckt ist: evcc meldet die Energie bis zum SOC-Ziel des Fahrzeugs, unabhängig davon, ob ein Auto angesteckt ist, und für ein abwesendes Auto reservierte Sonne fehlt der Batterie ohne Nutzen. Eine nicht verfügbare oder unbekannte Entität gilt als abwesend, damit ein defekter Sensor das Reservieren beendet, statt für ein womöglich abwesendes Gerät zu reservieren."
         }

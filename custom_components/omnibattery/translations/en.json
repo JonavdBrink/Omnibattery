@@ -1,5 +1,9 @@
 {
   "issues": {
+    "excluded_device_ev_type": {
+      "title": "Mark your EV charger among excluded devices",
+      "description": "The new energy-flow diagram (switch it on with the button in the flow card header) draws EV chargers on their own cable, next to the car. Omnibattery cannot tell which excluded device is the EV charger, so until you mark it, its power is shown on the other excluded-devices cable (the outdoor unit) and the EV cable stays empty. Open Options → Excluded devices and save your devices again, ticking \"EV charger\" on the charger (leave it unticked on the others). This only affects how the diagram is drawn, not battery control. The notice disappears once the devices have been saved."
+    },
     "battery_not_delivering": {
       "title": "Battery {battery} is not delivering power",
       "description": "{battery} has been accepting charge/discharge commands without delivering power for {minutes} minutes ({reason}). Omnibattery keeps it out of the pool and retries it every {cooldown} minutes, so the rest of the fleet covers the house meanwhile. The battery itself, its Modbus link or the bridge in front of it needs attention: check that it is not sitting in standby under its own app's control, and that the connection is not saturated. Switching Manual Battery Control on and off again for that battery often restores it."
@@ -303,6 +307,7 @@
           "dynamic_power_control": "Device has dynamic power control",
           "cover_home_when_active": "Cover home while device is active",
           "ev_charger_no_telemetry": "EV charger without power telemetry",
+          "is_ev_charger": "EV charger (flow diagram only)",
           "remaining_demand_sensor": "Expected remaining demand (kWh)",
           "remaining_demand_presence_sensor": "Presence entity for the remaining demand (optional)"
         },
@@ -314,6 +319,7 @@
           "dynamic_power_control": "Enable for devices that automatically adjust their own demand from the grid meter, such as a solar-surplus wallbox. If an activity sensor is configured, Omnibattery yields before power appears; otherwise it reacts to the power sensor. It then uses genuine leftover export.",
           "cover_home_when_active": "Requires Solar Surplus and a solar-production sensor. The battery may cover the home's own load while this device is active; only the device's grid share stays excluded.",
           "ev_charger_no_telemetry": "✓ CHECKED = Use the Activity / EV charging sensor instead of numeric power telemetry. Existing configurations that placed this state sensor in Device power sensor continue to work. When charging is detected, the battery pauses for 5 minutes; afterwards it may only charge from solar surplus and never discharges for the EV.",
+          "is_ev_charger": "Tick it if this device is an electric-vehicle charger. It is used only by the animated energy-flow diagram, to draw the device on the EV charger cable instead of the excluded-devices cable. It does not change how the battery manages the device.",
           "remaining_demand_sensor": "Optional. Sensor reporting the energy (kWh) this device still expects to consume today, for example sensor.evcc_[loadpoint]_charge_remaining_energy. Predictive charging then reserves that much of the remaining solar forecast for the device instead of assuming the battery receives it. Only used when 'Consumption is included in home consumption sensor' is checked. Devices marked 'EV charger without power telemetry' are skipped: their energy is already inside the consumption forecast, so reserving it would count it twice.",
           "remaining_demand_presence_sensor": "Only count the expected remaining demand while this entity reports the device as present: on, true, home, connected, plugged or present. Leave empty to always count it. Point it at your charger's connected entity when the upstream keeps reporting a demand with nothing plugged in: evcc reports the energy to the vehicle's SOC target whether or not a car is there, and reserving solar for an absent car takes it from the battery for nothing. An unavailable or unknown entity counts as absent, so a broken sensor stops reserving rather than reserving for a device that may not be there."
         }
@@ -1018,6 +1024,7 @@
           "dynamic_power_control": "Device has dynamic power control",
           "cover_home_when_active": "Cover home while device is active",
           "ev_charger_no_telemetry": "EV charger without power telemetry",
+          "is_ev_charger": "EV charger (flow diagram only)",
           "remaining_demand_sensor": "Expected remaining demand (kWh)",
           "remaining_demand_presence_sensor": "Presence entity for the remaining demand (optional)"
         },
@@ -1029,6 +1036,7 @@
           "dynamic_power_control": "Enable for devices that automatically adjust their own demand from the grid meter, such as a solar-surplus wallbox. If an activity sensor is configured, Omnibattery yields before power appears; otherwise it reacts to the power sensor. It then uses genuine leftover export.",
           "cover_home_when_active": "Requires Solar Surplus and a solar-production sensor. The battery may cover the home's own load while this device is active; only the device's grid share stays excluded.",
           "ev_charger_no_telemetry": "✓ CHECKED = Use the Activity / EV charging sensor instead of numeric power telemetry. Existing configurations that placed this state sensor in Device power sensor continue to work. When charging is detected, the battery pauses for 5 minutes; afterwards it may only charge from solar surplus and never discharges for the EV.",
+          "is_ev_charger": "Tick it if this device is an electric-vehicle charger. It is used only by the animated energy-flow diagram, to draw the device on the EV charger cable instead of the excluded-devices cable. It does not change how the battery manages the device.",
           "remaining_demand_sensor": "Optional. Sensor reporting the energy (kWh) this device still expects to consume today, for example sensor.evcc_[loadpoint]_charge_remaining_energy. Predictive charging then reserves that much of the remaining solar forecast for the device instead of assuming the battery receives it. Only used when 'Consumption is included in home consumption sensor' is checked. Devices marked 'EV charger without power telemetry' are skipped: their energy is already inside the consumption forecast, so reserving it would count it twice.",
           "remaining_demand_presence_sensor": "Only count the expected remaining demand while this entity reports the device as present: on, true, home, connected, plugged or present. Leave empty to always count it. Point it at your charger's connected entity when the upstream keeps reporting a demand with nothing plugged in: evcc reports the energy to the vehicle's SOC target whether or not a car is there, and reserving solar for an absent car takes it from the battery for nothing. An unavailable or unknown entity counts as absent, so a broken sensor stops reserving rather than reserving for a device that may not be there."
         }

@@ -52,6 +52,8 @@ const I18N = {
   en: {
     subtitle: "Control Panel",
     live: "Live",
+    evCharger: "EV charger",
+    flowToggle: "Switch diagram",
     tabResumen: "Overview", tabBaterias: "Batteries", tabControl: "Control",
     moreInfo: "Show history",
     zoomReset: "All",
@@ -140,6 +142,8 @@ const I18N = {
   es: {
     subtitle: "Panel de Control",
     live: "En vivo",
+    evCharger: "Cargador VE",
+    flowToggle: "Cambiar diagrama",
     tabResumen: "Resumen", tabBaterias: "Baterías", tabControl: "Control",
     moreInfo: "Ver histórico",
     zoomReset: "Todo",
@@ -229,6 +233,8 @@ const I18N = {
     subtitle: "Tauler de control",
     ctlLock: "Bloqueja els controls", ctlUnlock: "Desbloqueja els controls",
     live: "En directe",
+    evCharger: "Carregador VE",
+    flowToggle: "Canviar diagrama",
     tabResumen: "Resum", tabBaterias: "Bateries", tabControl: "Control",
     moreInfo: "Veure històric",
     zoomReset: "Tot",
@@ -313,6 +319,8 @@ const I18N = {
     subtitle: "Bedienfeld",
     ctlLock: "Steuerelemente sperren", ctlUnlock: "Steuerelemente entsperren",
     live: "Live",
+    evCharger: "E-Auto-Lader",
+    flowToggle: "Diagramm wechseln",
     tabResumen: "Übersicht", tabBaterias: "Batterien", tabControl: "Steuerung",
     moreInfo: "Verlauf anzeigen",
     zoomReset: "Alles",
@@ -397,6 +405,8 @@ const I18N = {
     subtitle: "Panneau de contrôle",
     ctlLock: "Verrouiller les commandes", ctlUnlock: "Déverrouiller les commandes",
     live: "En direct",
+    evCharger: "Chargeur VE",
+    flowToggle: "Changer de diagramme",
     tabResumen: "Résumé", tabBaterias: "Batteries", tabControl: "Contrôle",
     moreInfo: "Voir l'historique",
     zoomReset: "Tout",
@@ -481,6 +491,8 @@ const I18N = {
     subtitle: "Bedieningspaneel",
     ctlLock: "Bediening vergrendelen", ctlUnlock: "Bediening ontgrendelen",
     live: "Live",
+    evCharger: "EV-lader",
+    flowToggle: "Diagram wisselen",
     tabResumen: "Overzicht", tabBaterias: "Batterijen", tabControl: "Bediening",
     moreInfo: "Geschiedenis tonen",
     zoomReset: "Alles",
@@ -2057,6 +2069,11 @@ class MarstekVenusPanel extends HTMLElement {
     if (!devices.length) return null;
     let total = null;
     let included = 0; // portion the home sensor already counts (subtract from Home)
+    // v2 scene splits EV chargers (is_ev_charger) from the other excluded loads
+    let ev = null;
+    let other = null;
+    let hasEv = false;
+    let evActive = false; // no-telemetry charger reporting "charging" on its state sensor
     for (const device of devices) {
       let enabled = device.enabled !== false;
       const enabledState = device.enabled_entity
@@ -2065,11 +2082,18 @@ class MarstekVenusPanel extends HTMLElement {
       if (enabledState && enabledState.state === "on") enabled = true;
       else if (enabledState && enabledState.state === "off") enabled = false;
       if (!enabled) continue;
+      const isEv = device.is_ev_charger === true;
+      if (isEv) {
+        hasEv = true;
+        if (device.ev_charger_no_telemetry && this._activityOn(hass.states[device.activity_sensor])) evActive = true;
+      }
       const sid = device.power_sensor;
       if (!sid) continue; // EV-no-telemetry has no power sensor
       const w = this._watts(hass.states[sid]);
       if (w == null) continue;
       total = (total || 0) + w;
+      if (isEv) ev = (ev || 0) + w;
+      else other = (other || 0) + w;
       // Only devices the home sensor already includes (included_in_consumption
       // !== false) may be subtracted from the Home node. "Additional" devices
       // are not in the home sensor, so subtracting them would wrongly drive
@@ -2079,7 +2103,15 @@ class MarstekVenusPanel extends HTMLElement {
       // more, shown as a larger Battery flow) — not the demand-node magnitudes.
       if (device.included_in_consumption !== false) included += w;
     }
-    return total == null ? null : { total, included };
+    if (total == null && !hasEv) return null;
+    return { total, included, ev, other, hasEv, evActive };
+  }
+  /** Mirrors ExternalLoads._state_is_active: on/true/1 or a "charging" word. */
+  _activityOn(stateObj) {
+    if (!stateObj) return false;
+    const v = String(stateObj.state).toLowerCase().trim();
+    if (["on", "true", "1"].includes(v)) return true;
+    return ["charg", "cargand", "carreg", "laden", "caricand", "carica", "ladd", "lading"].some((w) => v.includes(w));
   }
 
   // --- model builder ---------------------------------------------------------
@@ -2250,8 +2282,13 @@ class MarstekVenusPanel extends HTMLElement {
     // excluded devices: summed power of all enabled excluded loads (kW). null
     // when none expose a power sensor — the flow node is hidden in that case.
     const excludedW = this._excludedPowerW();
-    const hasExcluded = excludedW != null;
+    const hasExcluded = excludedW != null && excludedW.total != null;
     const excluded = hasExcluded ? excludedW.total / 1000 : null;
+    // v2 scene: EV chargers on their own cable, the rest on the excluded one
+    const hasEv = excludedW != null && excludedW.hasEv;
+    const ev = hasEv && excludedW.ev != null ? excludedW.ev / 1000 : null;
+    const evActive = hasEv && excludedW.evActive;
+    const exclOther = excludedW != null && excludedW.other != null ? excludedW.other / 1000 : null;
 
     // Subtract from the Home node only the excluded devices the home sensor
     // already counts (included_in_consumption). They are drawn as their own
@@ -2306,6 +2343,10 @@ class MarstekVenusPanel extends HTMLElement {
       battery,
       excluded,
       hasExcluded,
+      hasEv,
+      ev,
+      evActive,
+      exclOther,
       soc,
       capacity,
       stored,
@@ -3816,30 +3857,64 @@ class MarstekVenusPanel extends HTMLElement {
   _buildFlowCard() {
     const { card, head } = this._card(this._t("cardFlow"), "mdi:transit-connection-variant");
     card.classList.add("flow-card");
+    // v1 = square render with corner leaders; v2 = wide render with the flows
+    // drawn along its cables (EV + excluded loads on their own cable).
+    let v2 = false;
+    try { v2 = localStorage.getItem("omnibattery-flow-v2") === "1"; } catch (e) { /* storage blocked */ }
+    delete this._r.nEv; // only v2 builds it; _patch checks for it
     const livePill = document.createElement("span");
     livePill.className = "pill";
     livePill.style.marginLeft = "auto";
     livePill.innerHTML = `<span class="dot live"></span>${this._t("live")}`;
-    head.appendChild(livePill);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "daily-op-nav-btn";
+    toggle.title = this._t("flowToggle");
+    toggle.setAttribute("aria-label", this._t("flowToggle"));
+    toggle.innerHTML = `<ha-icon icon="mdi:swap-horizontal"></ha-icon>`;
+    toggle.addEventListener("click", () => {
+      try { localStorage.setItem("omnibattery-flow-v2", v2 ? "0" : "1"); } catch (e) { /* storage blocked */ }
+      const fresh = this._buildFlowCard();
+      card.replaceWith(fresh);
+      this._cards.flow = fresh;
+      this._patch(this._model());
+    });
+    head.append(livePill, toggle);
 
     const wrap = document.createElement("div");
     wrap.className = "flow-wrap";
     const sq = document.createElement("div");
-    sq.className = "scene-stage";
+    sq.className = v2 ? "scene-stage wide" : "scene-stage";
 
     // 3D-render backdrop + leader-line callouts (Tesla style). Lines are
     // axis-aligned (straight, or an L-elbow), never diagonal, and stop short of
     // the label text. Day/night renders are swapped by sun position.
     const sceneBase = new URL(".", import.meta.url);
-    this._sceneDay = new URL("home-scene-day_2.png", sceneBase).href;
-    this._sceneNight = new URL("home-scene-night_2.png", sceneBase).href;
+    this._sceneDay = new URL(v2 ? "home-scene-day.png" : "home-scene-day_2.png", sceneBase).href;
+    this._sceneNight = new URL(v2 ? "home-scene-night.png" : "home-scene-night_2.png", sceneBase).href;
     const GAP = 5; // % gap so the line ends before the label text
 
     // ex,ey = point on the render. lx,ly = label position.
     // shape: "v"  straight vertical (lx == ex)
     //        "hv" horizontal from element, then vertical down/up to the label
     //        "vh" vertical from element, then horizontal to the label
-    const EDGES = [
+    // v2 adds `cable`: the flow path along the render's conduit, in the point
+    // order the shared rev flags expect (rev=false travels toward the first
+    // point). Grid joins Home at the window corner, per the render's wiring.
+    const EDGES = v2 ? [
+      { key: "nGrid", edge: "grid", cap: this._t("grid"), ex: 79.25, ey: 58.98, lx: 90, ly: 83, shape: "hv", gap: 2,
+        cable: "58.85,56.22 58.91,76.51 59.81,78.11 79.25,58.98" },
+      { key: "nSolar", edge: "solar", cap: this._t("solar"), ex: 64, ey: 30, lx: 64, ly: 9, shape: "v",
+        cable: "48.44,50.48 48.44,39.11" },
+      { key: "nHome", edge: "home", cap: this._t("home"), ex: 68, ey: 45, lx: 88, ly: 9, shape: "hv",
+        cable: "49.94,53.67 57.27,57.65 58.01,57.49 58.85,56.22" },
+      { key: "nBatt", edge: "batt", cap: this._t("battery"), ex: 47, ey: 73, lx: 30, ly: 83, shape: "hv", gap: 2,
+        cable: "48.44,63.23 48.44,56.22" },
+      { key: "nExcl", edge: "excl", cap: this._t("excludedDevices"), ex: 55, ey: 77, lx: 66, ly: 83, shape: "hv", gap: 2,
+        cable: "52.21,70.14 52.15,56.32 51.73,55.26 49.94,54.41" },
+      { key: "nEv", edge: "ev", cap: this._t("evCharger"), ex: 42.2, ey: 52, lx: 20, ly: 9, shape: "vh",
+        cable: "42.25,55.26 42.25,50.37 42.76,49.84 47.25,52.18" },
+    ] : [
       { key: "nGrid", edge: "grid", cap: this._t("grid"), ex: 38, ey: 63, lx: 12, ly: 9, shape: "hv" },
       { key: "nSolar", edge: "solar", cap: this._t("solar"), ex: 50, ey: 33, lx: 50, ly: 9, shape: "v" },
       { key: "nHome", edge: "home", cap: this._t("home"), ex: 66, ey: 48, lx: 88, ly: 9, shape: "hv" },
@@ -3860,16 +3935,24 @@ class MarstekVenusPanel extends HTMLElement {
       return `${e.ex},${e.ey} ${e.ex},${y2}`;
     };
 
+    // Points are % of the stage. The wide stage squashes y into a 100×56 viewBox
+    // so strokes stay uniform (a 100×100 box would stretch them horizontally).
+    const ky = v2 ? 941 / 1672 : 1;
+    const sy = (pts) => pts.split(" ").map((p) => {
+      const [x, y] = p.split(",");
+      return `${x},${+(y * ky).toFixed(2)}`;
+    }).join(" ");
+
     const day = this._isDaytime();
     this._sceneIsDay = day;
     sq.innerHTML =
       `<img class="scene-img" src="${day ? this._sceneDay : this._sceneNight}" alt="" draggable="false">` +
-      `<svg class="lead-svg" viewBox="0 0 100 100" preserveAspectRatio="none">` +
+      `<svg class="lead-svg" viewBox="0 0 100 ${100 * ky}" preserveAspectRatio="none">` +
       EDGES.map(
         (e) =>
-          `<polyline class="lead" data-edge="${e.edge}" points="${leadPts(e)}"/>` +
-          `<polyline class="lead-flow" data-edge="${e.edge}" pathLength="100" points="${leadPts(e)}"/>` +
-          `<circle class="lead-end" data-edge="${e.edge}" cx="${e.ex}" cy="${e.ey}" r="0.7"/>`
+          `<polyline class="lead" data-edge="${e.edge}" points="${sy(leadPts(e))}"/>` +
+          `<polyline class="lead-flow" data-edge="${e.edge}" pathLength="100" points="${sy(e.cable || leadPts(e))}"/>` +
+          `<circle class="lead-end" data-edge="${e.edge}" cx="${e.ex}" cy="${e.ey * ky}" r="0.7"/>`
       ).join("") +
       `</svg>`;
 
@@ -3885,6 +3968,9 @@ class MarstekVenusPanel extends HTMLElement {
       n.className = "scene-lbl l-" + e.edge;
       n.style.left = e.lx + "%";
       n.style.top = e.ly + "%";
+      // v2 bottom row: anchor by the top edge so the power value lines up even
+      // when a label has an extra badge row (battery).
+      if (v2 && e.ly > 50) n.style.transform = "translate(-50%, 0)";
       n.innerHTML =
         `<div class="lbl-val num"><span class="fn-v">—</span><span class="fn-unit"></span></div>` +
         `<div class="lbl-cap pf-label">${e.cap}</div>` +
@@ -4885,10 +4971,25 @@ class MarstekVenusPanel extends HTMLElement {
       (m.soc != null ? Math.round(m.soc) : "—") + "% · " + m.active + " " + this._t("units");
     // excluded devices (summed power → into the car). Node hidden when no
     // excluded device exposes a power sensor.
-    const exclActive = m.hasExcluded && m.excluded > 0.03;
+    let exclActive = m.hasExcluded && m.excluded > 0.03;
+    let exclShown = m.hasExcluded;
     r.nExcl.node.style.display = m.hasExcluded ? "" : "none";
     r.nExcl.node.classList.toggle("active", exclActive);
     r.nExcl.val.textContent = m.hasExcluded ? (m.excluded > 0.03 ? p(m.excluded) : "—") : "—";
+    // v2 scene: the excluded cable carries only non-EV loads; EV chargers get
+    // their own (a no-telemetry charger shows "—" and flows from its activity).
+    let evOn = false;
+    if (r.nEv) {
+      exclShown = m.exclOther != null;
+      exclActive = exclShown && m.exclOther > 0.03;
+      r.nExcl.node.style.display = exclShown ? "" : "none";
+      r.nExcl.node.classList.toggle("active", exclActive);
+      r.nExcl.val.textContent = exclActive ? p(m.exclOther) : "—";
+      evOn = m.hasEv && ((m.ev != null && m.ev > 0.03) || m.evActive);
+      r.nEv.node.style.display = m.hasEv ? "" : "none";
+      r.nEv.node.classList.toggle("active", evOn);
+      r.nEv.val.textContent = m.ev != null && m.ev > 0.03 ? p(m.ev) : "—";
+    }
 
     // wires (animated node-graph) — skipped in scene mode
     if (r.wires.solar) {
@@ -4907,8 +5008,10 @@ class MarstekVenusPanel extends HTMLElement {
       lead("home", home > 0.05);
       lead("batt", off(battery));
       lead("excl", exclActive);
+      lead("ev", evOn);
       (r.leads.solar || []).forEach((el) => (el.style.display = m.hasSolar ? "" : "none"));
-      (r.leads.excl || []).forEach((el) => (el.style.display = m.hasExcluded ? "" : "none"));
+      (r.leads.excl || []).forEach((el) => (el.style.display = exclShown ? "" : "none"));
+      (r.leads.ev || []).forEach((el) => (el.style.display = m.hasEv ? "" : "none"));
     }
 
     // animated "snake" flow lines: color + travel direction follow the live state
@@ -4940,8 +5043,10 @@ class MarstekVenusPanel extends HTMLElement {
       // excluded loads always flow "into" the car (a consumer): rev=false sends
       // the snake toward the element attach point (the car), not the label.
       flow("excl", exclActive, "var(--home)", false);
+      flow("ev", evOn, "var(--home)", false);
       (r.flows.solar || []).forEach((el) => (el.style.display = m.hasSolar ? "" : "none"));
-      (r.flows.excl || []).forEach((el) => (el.style.display = m.hasExcluded ? "" : "none"));
+      (r.flows.excl || []).forEach((el) => (el.style.display = exclShown ? "" : "none"));
+      (r.flows.ev || []).forEach((el) => (el.style.display = m.hasEv ? "" : "none"));
     }
 
     // day / night backdrop swap
@@ -7352,6 +7457,10 @@ class MarstekVenusPanel extends HTMLElement {
       .flow-card { position: relative; overflow: hidden; }
       .flow-wrap { display: grid; place-items: center; }
       .scene-stage { position: relative; width: 100%; max-width: 540px; aspect-ratio: 1; margin: 0 auto; container-type: inline-size; }
+      .scene-stage.wide { max-width: none; aspect-ratio: 1672 / 941; }
+      .scene-stage.wide .scene-self { left: 3%; transform: none; }
+      .scene-stage.wide .lead { stroke-width: 0.2; }
+      .scene-stage.wide .lead.on { stroke-width: 0.25; }
       .scene-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; border-radius: 14px; user-select: none; -webkit-user-drag: none; }
       .lead-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
       .lead { fill: none; stroke: #8b9197; stroke-width: 0.4; opacity: 0.55; stroke-linecap: round; stroke-linejoin: round; transition: opacity 0.4s, stroke-width 0.4s; }

@@ -61,6 +61,28 @@ async def test_initial_flow_exposes_and_saves_excluded_device_controls():
     assert flow.excluded_devices[0]["dynamic_power_control"] is True
     assert flow.excluded_devices[0]["cover_home_when_active"] is True
     assert flow.excluded_devices[0]["activity_sensor"] == "binary_sensor.ev_charging"
+    # Always written, so the one-time EV-type Repair clears after any save.
+    assert flow.excluded_devices[0]["is_ev_charger"] is False
+
+
+async def test_options_flow_restores_and_saves_ev_charger_type():
+    entry = SimpleNamespace(
+        entry_id="test-entry",
+        data={
+            "excluded_devices": [
+                {"power_sensor": "sensor.wallbox_power", "is_ev_charger": True}
+            ]
+        },
+    )
+    flow = _options_flow(entry)
+
+    form = await flow.async_step_add_excluded_device()
+    assert _schema_defaults(form)["is_ev_charger"] is True
+
+    await flow.async_step_add_excluded_device(
+        {"power_sensor": "sensor.wallbox_power", "is_ev_charger": False}
+    )
+    assert flow.excluded_devices[0]["is_ev_charger"] is False
 
 
 async def test_options_flow_restores_and_saves_excluded_device_controls():

@@ -1,5 +1,9 @@
 {
   "issues": {
+    "excluded_device_ev_type": {
+      "title": "Markeer je EV-lader bij de uitgesloten apparaten",
+      "description": "Het nieuwe energiestroomdiagram (inschakelen met de knop in de kop van de stroomkaart) tekent EV-laders op een eigen kabel, naast de auto. Omnibattery kan niet weten welk uitgesloten apparaat de lader is; totdat je het markeert, wordt het vermogen ervan op de kabel van de overige uitgesloten apparaten (de buitenunit) getoond en blijft de EV-kabel leeg. Open Opties → Uitgesloten apparaten en sla je apparaten opnieuw op, met \"EV-lader\" aangevinkt bij de lader (laat het uit bij de andere). Dit heeft alleen invloed op hoe het diagram wordt getekend, niet op de batterijbesturing. De melding verdwijnt zodra de apparaten zijn opgeslagen."
+    },
     "battery_not_delivering": {
       "title": "Batterij {battery} levert geen vermogen",
       "description": "{battery} neemt al {minutes} minuten laad-/ontlaadopdrachten aan zonder vermogen te leveren ({reason}). Omnibattery houdt hem buiten de verdeling en probeert het elke {cooldown} minuten opnieuw, zodat de rest van de vloot het huis ondertussen dekt. De batterij zelf, zijn Modbus-verbinding of de bridge ervoor heeft aandacht nodig: controleer of hij niet in stand-by staat onder besturing van zijn eigen app en of de verbinding niet verzadigd is. Handmatige batterijbesturing voor die batterij aan- en weer uitzetten herstelt hem vaak."
@@ -307,6 +311,7 @@
           "dynamic_power_control": "Apparaat heeft dynamische vermogensregeling",
           "cover_home_when_active": "Huis dekken terwijl het apparaat actief is",
           "ev_charger_no_telemetry": "EV-lader zonder vermogenstelemetrie",
+          "is_ev_charger": "EV-lader (alleen stroomdiagram)",
           "remaining_demand_sensor": "Verwachte resterende vraag (kWh)",
           "remaining_demand_presence_sensor": "Aanwezigheids-entiteit voor de resterende vraag (optioneel)"
         },
@@ -318,6 +323,7 @@
           "dynamic_power_control": "Schakel dit in voor apparaten die hun vraag automatisch via de netmeter regelen. Met een activiteitssensor wijkt Omnibattery voordat vermogen verschijnt; anders reageert het op de vermogenssensor. Daarna wordt alleen het werkelijk resterende overschot gebruikt.",
           "cover_home_when_active": "Vereist Zonne-overschot en een sensor voor zonneproductie. De batterij mag het eigen huisverbruik dekken terwijl dit apparaat actief is; alleen het netaandeel van het apparaat blijft uitgesloten.",
           "ev_charger_no_telemetry": "✓ AANGEVINKT = Gebruikt de sensor Apparaat actief / EV-laden in plaats van numerieke telemetrie. Bestaande configuraties met deze sensor in het vermogensveld blijven werken. Bij gedetecteerd laden pauzeert de batterij 5 minuten; daarna laadt ze alleen met zonne-overschot en ontlaadt nooit voor de EV.",
+          "is_ev_charger": "Aanvinken als dit apparaat een laadpaal voor elektrische voertuigen is. Wordt alleen gebruikt door het geanimeerde energiestroomdiagram, om het apparaat op de kabel van de EV-lader te tekenen in plaats van op de kabel van uitgesloten apparaten. Verandert niet hoe de batterij het apparaat beheert.",
           "remaining_demand_sensor": "Optioneel. Sensor met de energie (kWh) die dit apparaat vandaag nog denkt te verbruiken, bijvoorbeeld sensor.evcc_[laadpunt]_charge_remaining_energy. Predictief laden reserveert dan dat deel van de resterende zonprognose voor het apparaat in plaats van aan te nemen dat de batterij het krijgt. Werkt alleen als 'Verbruik zit in de sensor voor thuisverbruik' is aangevinkt. Apparaten met 'EV-lader zonder vermogenstelemetrie' worden overgeslagen: hun energie zit al in de verbruiksprognose, dus reserveren zou dubbel tellen.",
           "remaining_demand_presence_sensor": "Tel de verwachte resterende vraag alleen mee zolang deze entiteit het apparaat als aanwezig meldt: on, true, home, connected, plugged of present. Leeg laten betekent altijd meetellen. Wijs hem naar de connected-entiteit van je laadpaal als de bron een vraag blijft melden terwijl er niets ingeplugd is: evcc meldt de energie tot het SOC-doel van de auto, of er nu een auto hangt of niet, en zon reserveren voor een afwezige auto haalt die weg bij de batterij zonder dat er iets mee gebeurt. Een onbeschikbare of onbekende entiteit telt als afwezig, zodat een kapotte sensor stopt met reserveren in plaats van te reserveren voor een apparaat dat er misschien niet is."
         }
@@ -1022,6 +1028,7 @@
           "dynamic_power_control": "Apparaat heeft dynamische vermogensregeling",
           "cover_home_when_active": "Huis dekken terwijl het apparaat actief is",
           "ev_charger_no_telemetry": "EV-lader zonder vermogenstelemetrie",
+          "is_ev_charger": "EV-lader (alleen stroomdiagram)",
           "remaining_demand_sensor": "Verwachte resterende vraag (kWh)",
           "remaining_demand_presence_sensor": "Aanwezigheids-entiteit voor de resterende vraag (optioneel)"
         },
@@ -1033,6 +1040,7 @@
           "dynamic_power_control": "Schakel dit in voor apparaten die hun vraag automatisch via de netmeter regelen. Met een activiteitssensor wijkt Omnibattery voordat vermogen verschijnt; anders reageert het op de vermogenssensor. Daarna wordt alleen het werkelijk resterende overschot gebruikt.",
           "cover_home_when_active": "Vereist Zonne-overschot en een sensor voor zonneproductie. De batterij mag het eigen huisverbruik dekken terwijl dit apparaat actief is; alleen het netaandeel van het apparaat blijft uitgesloten.",
           "ev_charger_no_telemetry": "✓ AANGEVINKT = Gebruikt de sensor Apparaat actief / EV-laden in plaats van numerieke telemetrie. Bestaande configuraties met deze sensor in het vermogensveld blijven werken. Bij gedetecteerd laden pauzeert de batterij 5 minuten; daarna laadt ze alleen met zonne-overschot en ontlaadt nooit voor de EV.",
+          "is_ev_charger": "Aanvinken als dit apparaat een laadpaal voor elektrische voertuigen is. Wordt alleen gebruikt door het geanimeerde energiestroomdiagram, om het apparaat op de kabel van de EV-lader te tekenen in plaats van op de kabel van uitgesloten apparaten. Verandert niet hoe de batterij het apparaat beheert.",
           "remaining_demand_sensor": "Optioneel. Sensor met de energie (kWh) die dit apparaat vandaag nog denkt te verbruiken, bijvoorbeeld sensor.evcc_[laadpunt]_charge_remaining_energy. Predictief laden reserveert dan dat deel van de resterende zonprognose voor het apparaat in plaats van aan te nemen dat de batterij het krijgt. Werkt alleen als 'Verbruik zit in de sensor voor thuisverbruik' is aangevinkt. Apparaten met 'EV-lader zonder vermogenstelemetrie' worden overgeslagen: hun energie zit al in de verbruiksprognose, dus reserveren zou dubbel tellen.",
           "remaining_demand_presence_sensor": "Tel de verwachte resterende vraag alleen mee zolang deze entiteit het apparaat als aanwezig meldt: on, true, home, connected, plugged of present. Leeg laten betekent altijd meetellen. Wijs hem naar de connected-entiteit van je laadpaal als de bron een vraag blijft melden terwijl er niets ingeplugd is: evcc meldt de energie tot het SOC-doel van de auto, of er nu een auto hangt of niet, en zon reserveren voor een afwezige auto haalt die weg bij de batterij zonder dat er iets mee gebeurt. Een onbeschikbare of onbekende entiteit telt als afwezig, zodat een kapotte sensor stopt met reserveren in plaats van te reserveren voor een apparaat dat er misschien niet is."
         }
