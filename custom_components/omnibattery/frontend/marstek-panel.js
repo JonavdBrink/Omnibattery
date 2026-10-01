@@ -3859,8 +3859,9 @@ class MarstekVenusPanel extends HTMLElement {
     card.classList.add("flow-card");
     // v1 = square render with corner leaders; v2 = wide render with the flows
     // drawn along its cables (EV + excluded loads on their own cable).
-    let v2 = false;
-    try { v2 = localStorage.getItem("omnibattery-flow-v2") === "1"; } catch (e) { /* storage blocked */ }
+    // v2 is the default; only an explicit "0" (toggled back) keeps v1.
+    let v2 = true;
+    try { v2 = localStorage.getItem("omnibattery-flow-v2") !== "0"; } catch (e) { /* storage blocked */ }
     delete this._r.nEv; // only v2 builds it; _patch checks for it
     const livePill = document.createElement("span");
     livePill.className = "pill";
@@ -3907,13 +3908,13 @@ class MarstekVenusPanel extends HTMLElement {
       { key: "nSolar", edge: "solar", cap: this._t("solar"), ex: 64, ey: 30, lx: 64, ly: 9, shape: "v",
         cable: "48.44,50.48 48.44,39.11" },
       { key: "nHome", edge: "home", cap: this._t("home"), ex: 68, ey: 45, lx: 88, ly: 9, shape: "hv",
-        cable: "49.94,53.67 57.27,57.65 58.01,57.49 58.85,56.22" },
+        cable: "49.94,53.82 56.42,57.55 57.02,57.78 57.82,57.03 58.85,56.22" },
       { key: "nBatt", edge: "batt", cap: this._t("battery"), ex: 47, ey: 73, lx: 30, ly: 83, shape: "hv", gap: 2,
         cable: "48.44,63.23 48.44,56.22" },
-      { key: "nExcl", edge: "excl", cap: this._t("excludedDevices"), ex: 55, ey: 77, lx: 66, ly: 83, shape: "hv", gap: 2,
+      { key: "nExcl", edge: "excl", cap: this._t("excludedDevices"), ex: 55, ey: 77, lx: 66, ly: 83, shape: "vh", hy: 85,
         cable: "52.21,70.14 52.15,56.32 51.73,55.26 49.94,54.41" },
       { key: "nEv", edge: "ev", cap: this._t("evCharger"), ex: 42.2, ey: 52, lx: 20, ly: 9, shape: "vh",
-        cable: "42.25,55.26 42.25,50.37 42.76,49.84 47.25,52.18" },
+        cable: "42.35,55.26 42.35,50.54 42.46,50.05 42.80,49.85 47.29,52.63" },
     ] : [
       { key: "nGrid", edge: "grid", cap: this._t("grid"), ex: 38, ey: 63, lx: 12, ly: 9, shape: "hv" },
       { key: "nSolar", edge: "solar", cap: this._t("solar"), ex: 50, ey: 33, lx: 50, ly: 9, shape: "v" },
@@ -3929,7 +3930,8 @@ class MarstekVenusPanel extends HTMLElement {
       }
       if (e.shape === "vh") {
         const x2 = e.lx < e.ex ? e.lx + g : e.lx - g;
-        return `${e.ex},${e.ey} ${e.ex},${e.ly} ${x2},${e.ly}`;
+        const hy = e.hy ?? e.ly; // top-anchored labels: run into the value line
+        return `${e.ex},${e.ey} ${e.ex},${hy} ${x2},${hy}`;
       }
       const y2 = e.ly < e.ey ? e.ly + g : e.ly - g; // "v"
       return `${e.ex},${e.ey} ${e.ex},${y2}`;
@@ -3952,7 +3954,7 @@ class MarstekVenusPanel extends HTMLElement {
         (e) =>
           `<polyline class="lead" data-edge="${e.edge}" points="${sy(leadPts(e))}"/>` +
           `<polyline class="lead-flow" data-edge="${e.edge}" pathLength="100" points="${sy(e.cable || leadPts(e))}"/>` +
-          `<circle class="lead-end" data-edge="${e.edge}" cx="${e.ex}" cy="${e.ey * ky}" r="0.7"/>`
+          `<circle class="lead-end" data-edge="${e.edge}" cx="${e.ex}" cy="${e.ey * ky}" r="${v2 ? 0.4 : 0.7}"/>`
       ).join("") +
       `</svg>`;
 
@@ -7461,6 +7463,7 @@ class MarstekVenusPanel extends HTMLElement {
       .scene-stage.wide .scene-self { left: 3%; transform: none; }
       .scene-stage.wide .lead { stroke-width: 0.2; }
       .scene-stage.wide .lead.on { stroke-width: 0.25; }
+      .scene-stage.wide .lead-flow { stroke-width: 0.25; }
       .scene-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; border-radius: 14px; user-select: none; -webkit-user-drag: none; }
       .lead-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
       .lead { fill: none; stroke: #8b9197; stroke-width: 0.4; opacity: 0.55; stroke-linecap: round; stroke-linejoin: round; transition: opacity 0.4s, stroke-width 0.4s; }

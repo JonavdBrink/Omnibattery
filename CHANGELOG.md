@@ -4,7 +4,7 @@
 
 ### Added
 
-- **New energy-flow diagram drawn on the house's cables**, switchable with the old one from the card header (choice remembered per browser). EV chargers get their own cable: mark them with the new **EV charger** option on each excluded device (diagram only, no control change); a one-time Repair asks existing setups to do so.
+- **New energy-flow diagram drawn on the house's cables**, now the default, with the old one still one click away in the card header (choice remembered per browser). EV chargers get their own cable: mark them with the new **EV charger** option on each excluded device (diagram only, no control change); a one-time Repair asks existing setups to do so.
 
 ### Fixed
 
