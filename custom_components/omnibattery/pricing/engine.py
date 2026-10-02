@@ -926,8 +926,7 @@ class PricingManager:
             slots = self.get_future_price_slots(horizon_end)
             if getattr(controller, "_price_data_status", None) == "no_future_slots":
                 controller._price_data_status = previous_status
-            integration_type = controller.price_integration_type
-            return self._apply_zonneplan_export_bonus(slots, integration_type)
+            return slots
         integration_type = (
             getattr(controller, "export_price_integration_type", None)
             or controller.price_integration_type
