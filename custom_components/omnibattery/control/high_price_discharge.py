@@ -40,6 +40,7 @@ from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 
 from ..const import PREDICTIVE_MODE_DYNAMIC_PRICING
+from ..pricing import PriceSlot
 from ..pricing.curtailment import distribute_solar_forecast
 from ..pricing.discharge_reserve import consumption_by_slot
 from ..pricing.high_price_discharge import (
@@ -409,11 +410,19 @@ class HighPriceDischargeManager:
         # crossing midnight does not apply tonight's evening to tomorrow's.
         # Empty means no usable profile, and demand this feature cannot measure
         # is demand it must not sell against (RF-030).
+        # Before the next day's curve is published the prices stop at midnight.
+        # The night up to sunrise is still protected: one unpriced tail slot
+        # the planner never sells into nor links a buy-back to (#530).
+        priced_end = max(slot.end for slot in slots)
+        tail = (
+            [PriceSlot(priced_end, horizon_end, None)] if priced_end < horizon_end else []
+        )
+
         forecast = pricing._profile_remaining_consumption(now, horizon_end)
         if forecast is None:
             return []
         consumption = consumption_by_slot(
-            slots,
+            [*slots, *tail],
             getattr(forecast, "intervals_by_date", None) or {},
             getattr(forecast, "intervals_kwh", None),
         )
@@ -430,6 +439,17 @@ class HighPriceDischargeManager:
                     import_price=self._import_price(import_slots, slot),
                     consumption_kwh=float(consumption.get(slot, 0.0) or 0.0),
                     solar_kwh=float(solar_by_slot.get(slot, 0.0) or 0.0),
+                )
+            )
+        for slot in tail:
+            horizon.append(
+                HorizonSlot(
+                    start=self._aware(slot.start),
+                    end=self._aware(slot.end),
+                    export_price=None,
+                    import_price=None,
+                    consumption_kwh=float(consumption.get(slot, 0.0) or 0.0),
+                    solar_kwh=0.0,
                 )
             )
         return horizon

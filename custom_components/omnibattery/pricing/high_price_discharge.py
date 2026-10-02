@@ -456,6 +456,15 @@ def plan_high_price_discharge(
         if (deficit := max(0.0, slot.consumption_kwh - slot.solar_kwh)) > EPSILON
     ]
 
+    # A trailing run with no import price is the night after the last
+    # published price (#530): still protected demand, never a buy-back link.
+    priced_end = len(working)
+    while priced_end and not _finite(working[priced_end - 1].import_price):
+        priced_end -= 1
+    unpriced_tail_kwh = sum(
+        max(0.0, slot.consumption_kwh - slot.solar_kwh) for slot in working[priced_end:]
+    )
+
     valid_batteries = [battery for battery in batteries if _valid_battery(battery)]
     usable_energy_kwh = sum(
         max(0.0, (battery.soc_pct - battery.floor_soc_pct) / 100.0 * battery.capacity_kwh)
@@ -541,15 +550,24 @@ def plan_high_price_discharge(
             entry.remaining_kwh = covered
             covered_left -= covered
         tail = list(reversed(ledger))
+    # Without a run-out the tail must still be covered after the sale. A
+    # chronological battery runs out at the end, i.e. in the tail, so it may
+    # only sell beyond all protected demand; a reserve-steered one keeps the tail.
+    if unpriced_tail_kwh <= EPSILON:
+        tail_reserve_kwh = 0.0
+    elif chronological_coverage:
+        tail_reserve_kwh = protected_demand_kwh
+    else:
+        tail_reserve_kwh = unpriced_tail_kwh
 
     candidates: list[tuple[HorizonSlot, float]] = []
     for index, slot in enumerate(working if enabled else ()):
         if slot.export_price is None or not _finite(slot.export_price):
             continue
-        later_slots = working[index + 1 :]
+        later_slots = working[index + 1 : priced_end]
         if not later_slots:
-            # Nothing can be linked after the last slot in the window either,
-            # so this candidate could never carry a demand link regardless.
+            # Nothing priced can be linked after this slot, so this candidate
+            # could never carry a demand link regardless.
             continue
         if any(
             later.import_price is None or not _finite(later.import_price)
@@ -599,11 +617,14 @@ def plan_high_price_discharge(
                 continue
         else:
             linkable = sorted(
-                (entry for entry in ledger if entry.start >= slot.end and entry.remaining_kwh > EPSILON),
+                (entry for entry in ledger if entry.start >= slot.end and entry.remaining_kwh > EPSILON
+                 and _finite(entry.import_price)),
                 key=lambda entry: entry.start,
             )
             linkable_demand_kwh = sum(entry.remaining_kwh for entry in linkable)
-            allocation_kwh = min(capacity_kwh, remaining_usable_kwh, linkable_demand_kwh)
+            allocation_kwh = min(
+                capacity_kwh, remaining_usable_kwh - tail_reserve_kwh, linkable_demand_kwh
+            )
             if allocation_kwh <= EPSILON:
                 continue
 

@@ -446,6 +446,34 @@ def test_horizon_ends_at_the_next_sunrise_not_the_next_days(hour, expected_end):
     assert requested == [expected_end]
 
 
+def test_unpublished_night_becomes_an_unpriced_tail_not_a_coverage_gap():
+    """After sunrise the prices stop at midnight; the night is still protected (#530)."""
+    midnight = DAY + timedelta(days=1)
+    now = DAY + timedelta(hours=9)
+
+    def slots(export):
+        return [
+            PriceSlot(DAY + timedelta(hours=hour), DAY + timedelta(hours=hour + 1),
+                      PEAK_PRICE if export and hour == 9 else BASE_PRICE)
+            for hour in range(9, 24)
+        ]
+
+    pricing = _pricing(
+        get_future_export_price_slots=lambda horizon_end=None: slots(True),
+        get_future_price_slots=lambda horizon_end=None: slots(False),
+    )
+    manager, _controller, _setpoints = _manager(now, pricing=pricing)
+
+    horizon = manager._build_horizon(pricing, now, HORIZON_END)
+    tail = horizon[-1]
+    assert (tail.start, tail.end) == (manager._aware(midnight), manager._aware(HORIZON_END))
+    assert (tail.export_price, tail.import_price, tail.solar_kwh) == (None, None, 0.0)
+    assert tail.consumption_kwh == pytest.approx(0.3 * 7)
+
+    manager.refresh_override()
+    assert manager._plan.reason != "coverage_gap"
+
+
 # Trigger 1 wiring uses a patched planner so these tests are independent of the
 # separate pure-planner implementation.
 def test_surplus_only_flag_and_rebuild_on_toggle(monkeypatch):
