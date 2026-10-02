@@ -2622,10 +2622,24 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 _LOGGER.error("Error validating dynamic pricing config: %s", e)
                 errors["base"] = "unknown"
 
-        default_integration = existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL)
-        default_sensor = existing_config.get(CONF_PRICE_SENSOR, "")
-        default_export_sensor = existing_config.get(CONF_EXPORT_PRICE_SENSOR)
-        default_export_type = existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+        form_input = user_input or {}
+        default_integration = form_input.get(
+            CONF_PRICE_INTEGRATION_TYPE,
+            existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL),
+        )
+        default_sensor = form_input.get(
+            CONF_PRICE_SENSOR, existing_config.get(CONF_PRICE_SENSOR, "")
+        )
+        default_export_sensor = (
+            form_input.get(CONF_EXPORT_PRICE_SENSOR)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_SENSOR)
+        )
+        default_export_type = (
+            form_input.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+        )
         effective_export_type = (
             default_export_type or default_integration
             if default_export_sensor
@@ -2652,9 +2666,12 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
         if effective_export_type == PRICE_INTEGRATION_ZONNEPLAN:
             schema_dict[vol.Optional(
                 CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                default=existing_config.get(
+                default=form_input.get(
                     CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                    existing_config.get(
+                        CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                        DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                    ),
                 ),
             )] = BooleanSelector()
         if not _has_global_forecast_sensor(existing_config):
@@ -5348,10 +5365,24 @@ class OptionsFlowHandler(OptionsFlow):
                 _LOGGER.error("Error validating dynamic pricing config: %s", e)
                 errors["base"] = "unknown"
 
-        default_integration = existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL)
-        default_sensor = existing_config.get(CONF_PRICE_SENSOR, "")
-        default_export_sensor = existing_config.get(CONF_EXPORT_PRICE_SENSOR)
-        default_export_type = existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+        form_input = user_input or {}
+        default_integration = form_input.get(
+            CONF_PRICE_INTEGRATION_TYPE,
+            existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL),
+        )
+        default_sensor = form_input.get(
+            CONF_PRICE_SENSOR, existing_config.get(CONF_PRICE_SENSOR, "")
+        )
+        default_export_sensor = (
+            form_input.get(CONF_EXPORT_PRICE_SENSOR)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_SENSOR)
+        )
+        default_export_type = (
+            form_input.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+        )
         effective_export_type = (
             default_export_type or default_integration
             if default_export_sensor
@@ -5378,9 +5409,12 @@ class OptionsFlowHandler(OptionsFlow):
         if effective_export_type == PRICE_INTEGRATION_ZONNEPLAN:
             schema_dict[vol.Optional(
                 CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                default=existing_config.get(
+                default=form_input.get(
                     CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                    existing_config.get(
+                        CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                        DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                    ),
                 ),
             )] = BooleanSelector()
         if not _has_global_forecast_sensor(existing_config):
