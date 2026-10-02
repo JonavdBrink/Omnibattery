@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from homeassistant.util import dt as dt_util
 
+from custom_components.omnibattery.const import DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED
 from custom_components.omnibattery.pricing import calculations
 from custom_components.omnibattery.pricing.engine import PricingManager
 
@@ -122,6 +123,29 @@ def test_independent_export_curve_uses_shared_dispatch(
     assert manager.get_future_price_slots(datetime(2999, 1, 2))[0].price == pytest.approx(0.3579015)
 
 
+def test_missing_export_sensor_falls_back_to_import_without_export_bonus():
+    controller = SimpleNamespace(
+        price_integration_type="zonneplan",
+        price_sensor="sensor.import",
+        export_price_sensor=None,
+        export_price_integration_type="zonneplan",
+        zonneplan_export_bonus_enabled=True,
+        _price_data_status="ok",
+    )
+    state = SimpleNamespace(
+        state="0.3579015", attributes={"forecast": [entry()]}
+    )
+    manager = PricingManager(
+        SimpleNamespace(states=SimpleNamespace(get=lambda _: state)), controller
+    )
+
+    import_slots = manager.get_future_price_slots(datetime(2999, 1, 2))
+    export_slots = manager.get_future_export_price_slots(datetime(2999, 1, 2))
+
+    assert export_slots == import_slots
+    assert export_slots[0].price == pytest.approx(0.3579015)
+
+
 def test_shared_export_selector_and_validation():
     from custom_components.omnibattery.config_flow import _price_integration_export_options, _validate_price_sensor
 
@@ -175,6 +199,67 @@ async def test_zonneplan_export_bonus_setting_visibility(config_data, expected_v
     assert ("zonneplan_export_bonus_enabled" in fields) is expected_visible
 
 
+@pytest.mark.parametrize("options", [False, True])
+async def test_switching_export_provider_keeps_selection_after_validation_error(options):
+    from custom_components.omnibattery.config_flow import (
+        MarstekVenusConfigFlow,
+        OptionsFlowHandler,
+    )
+
+    config_entry = SimpleNamespace(
+        entry_id="test",
+        data={
+            "price_integration_type": "nordpool",
+            "price_sensor": "sensor.import",
+            "export_price_sensor": "sensor.export",
+            "export_price_integration_type": "nordpool",
+        },
+        options={},
+    )
+    flow = OptionsFlowHandler(config_entry) if options else MarstekVenusConfigFlow()
+    if not options:
+        flow.config_data.update(config_entry.data)
+    flow.handler = config_entry.entry_id
+    states = {
+        "sensor.import": SimpleNamespace(
+            state="0.1",
+            attributes={
+                "raw_today": [
+                    {
+                        "start": datetime.now(),
+                        "end": datetime.now() + timedelta(hours=1),
+                        "value": 0.1,
+                    }
+                ]
+            },
+        ),
+        "sensor.export": SimpleNamespace(state="0.1", attributes={}),
+    }
+    flow.hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_get_known_entry=lambda _: config_entry,
+        ),
+        states=SimpleNamespace(get=states.get),
+    )
+
+    form = await flow.async_step_dynamic_pricing_config(
+        {
+            "price_integration_type": "nordpool",
+            "price_sensor": "sensor.import",
+            "export_price_sensor": "sensor.export",
+            "export_price_integration_type": "zonneplan",
+        }
+    )
+
+    assert form["errors"]["export_price_sensor"] == "no_price_data"
+    schema = form["data_schema"].schema
+    fields = {marker.schema: marker for marker in schema}
+    assert "zonneplan_export_bonus_enabled" in fields
+    assert fields["export_price_integration_type"].description == {
+        "suggested_value": "zonneplan"
+    }
+
+
 def test_parse_error_logs_offending_entry(caplog):
     bad = entry(amount="invalid-amount")
     with caplog.at_level("DEBUG"):
@@ -218,7 +303,9 @@ async def test_setup_and_options_validate_and_save_zonneplan(options, valid, bon
         assert flow.config_data["price_integration_type"] == "zonneplan"
         assert flow.config_data["price_sensor"] == "sensor.tariff"
         assert flow.config_data["zonneplan_export_bonus_enabled"] is (
-            True if bonus_enabled is None else bonus_enabled
+            DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED
+            if bonus_enabled is None
+            else bonus_enabled
         )
         assert result.get("errors", {}) == {}
     else:
