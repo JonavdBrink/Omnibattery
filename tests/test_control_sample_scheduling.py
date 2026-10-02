@@ -149,7 +149,7 @@ def _main_controller(state_holder, pd_calls):
         _compute_pd_new_power=_pd,
         _apply_zero_cross_hold=lambda power, _error, stale_recalc=False: power,
         _apply_min_power=lambda power, _error: power,
-        _apply_relay_dwell=lambda power, _error: power,
+        _apply_relay_dwell=lambda power, _error, stale_recalc=False: power,
         _is_operation_allowed=lambda _is_charging: True,
         _price_based_discharge_blocked=False,
         _solar_surplus_discharge_blocked=False,

@@ -8311,7 +8311,7 @@ class ChargeDischargeController:
             return 0
         return new_power
 
-    def _apply_relay_dwell(self, new_power, error):
+    def _apply_relay_dwell(self, new_power, error, stale_recalc=False):
         """RELAY ANTI-CHATTER (shut-off dwell).
 
         When the controller decides to send the battery back to idle, keep it
@@ -8339,8 +8339,14 @@ class ChargeDischargeController:
         clouds), so a suppressed flip always holds: the wrong-direction cost is
         min power for at most the settle window.
 
+        ``stale_recalc`` marks a pass without a new meter sample: its command is
+        the frozen previous one (the held minimum), not a fresh "active" decision,
+        so an armed timer must survive it (same trap as #117 in the zero-cross hold).
+
         Returns the (possibly held) power and manages the dwell timer as a side effect.
         """
+        if stale_recalc and self._relay_shutoff_since is not None:
+            return new_power
         suppressed_flip = self._zero_cross_since is not None
         wants_idle = (
             self._relay_cooldown_s > 0
@@ -9504,7 +9510,9 @@ class ChargeDischargeController:
 
         new_power = self._apply_min_power(new_power, error)
 
-        new_power = self._apply_relay_dwell(new_power, error)
+        new_power = self._apply_relay_dwell(
+            new_power, error, stale_recalc=stale_safety_recalc
+        )
 
 
         # Determine if charging or discharging (before applying restrictions)
