@@ -6,7 +6,8 @@
 - **Independent export price curve**: configure a separate feed-in price sensor and provider, with an optional Zonneplan export bonus of €0.02/kWh plus 10%.
 
 ### Fixed
-- **Dynamic-pricing forms retain all submitted values after validation errors, and the import-curve fallback no longer receives the Zonneplan export bonus.**
+- **Configuration forms retain submitted values after validation errors**: when setup or options validation returns the user to a form, entered values are restored across the integration's configuration steps. Sensor selections, price providers, time-slot settings and other fields no longer need to be entered again.
+- **The Zonneplan export bonus only affects a separate export price curve**: when no export sensor is configured, export pricing falls back to the import curve unchanged, so the bonus cannot inflate the import price.
 
 ## [1.5.0b5] - 2026-09-28
 

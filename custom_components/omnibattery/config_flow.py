@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import functools
+import inspect
 import logging
 import math
 from typing import Any
@@ -35,6 +38,7 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    Selector,
 )
 
 from .infra.mac_tracking import (
@@ -1257,6 +1261,80 @@ def _apply_mac_tracking(user_input: dict, merged: dict) -> None:
     merged[CONF_MAC] = (normalise_mac(user_input.get(CONF_MAC)) or "") if enabled else ""
 
 
+def _restore_submitted_values(data_schema: vol.Schema, user_input: dict[str, Any]) -> vol.Schema:
+    """Return a form schema that prefills the values submitted with an error."""
+    if not isinstance(data_schema.schema, dict):
+        return data_schema
+
+    schema: dict = {}
+    for marker, validator in data_schema.schema.items():
+        if (
+            not isinstance(marker, vol.Marker)
+            or not isinstance(marker.schema, str)
+            or marker.schema not in user_input
+        ):
+            schema[marker] = validator
+            continue
+
+        value = user_input[marker.schema]
+        restored_marker = copy.copy(marker)
+        if isinstance(validator, Selector):
+            description = (
+                dict(marker.description)
+                if isinstance(marker.description, dict)
+                else {}
+            )
+            description["suggested_value"] = value
+            restored_marker.description = description
+        if not (
+            isinstance(validator, (EntitySelector, DeviceSelector))
+            and isinstance(marker, vol.Optional)
+        ):
+            restored_marker.default = lambda value=value: value
+        schema[restored_marker] = validator
+
+    return vol.Schema(schema, required=data_schema.required, extra=data_schema.extra)
+
+
+def _preserve_values_in_error_forms(flow_class):
+    """Wrap flow steps so validation errors do not discard their submitted values."""
+    for name, method in inspect.getmembers(flow_class, inspect.iscoroutinefunction):
+        if (
+            not name.startswith("async_step_")
+            or "user_input" not in inspect.signature(method).parameters
+            or getattr(method, "_preserves_submitted_values", False)
+        ):
+            continue
+
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        async def wrapped(self, *args, __method=method, __signature=signature, **kwargs):
+            submitted = __signature.bind_partial(self, *args, **kwargs).arguments.get(
+                "user_input"
+            )
+            result = await __method(self, *args, **kwargs)
+            if (
+                not isinstance(submitted, dict)
+                or not isinstance(result, dict)
+                or result.get("type") != "form"
+                or not result.get("errors")
+            ):
+                return result
+
+            data_schema = result.get("data_schema")
+            if not isinstance(data_schema, vol.Schema):
+                return result
+            updated = dict(result)
+            updated["data_schema"] = _restore_submitted_values(data_schema, submitted)
+            return updated
+
+        wrapped._preserves_submitted_values = True
+        setattr(flow_class, name, wrapped)
+    return flow_class
+
+
+@_preserve_values_in_error_forms
 class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Omnibattery."""
 
@@ -2675,7 +2753,11 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 ),
             )] = BooleanSelector()
         if not _has_global_forecast_sensor(existing_config):
-            default_forecast = existing_config.get("solar_forecast_sensor", "")
+            default_forecast = (
+                form_input.get("solar_forecast_sensor")
+                if user_input is not None
+                else existing_config.get("solar_forecast_sensor", "")
+            )
             schema_dict[vol.Optional(
                 "solar_forecast_sensor",
                 description={"suggested_value": default_forecast} if default_forecast else {},
@@ -3584,6 +3666,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
         return refusal
 
 
+@_preserve_values_in_error_forms
 class OptionsFlowHandler(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
@@ -5418,7 +5501,11 @@ class OptionsFlowHandler(OptionsFlow):
                 ),
             )] = BooleanSelector()
         if not _has_global_forecast_sensor(existing_config):
-            default_forecast = existing_config.get("solar_forecast_sensor", "")
+            default_forecast = (
+                form_input.get("solar_forecast_sensor")
+                if user_input is not None
+                else existing_config.get("solar_forecast_sensor", "")
+            )
             schema_dict[vol.Optional(
                 "solar_forecast_sensor",
                 description={"suggested_value": default_forecast} if default_forecast else {},
