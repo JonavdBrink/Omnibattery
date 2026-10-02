@@ -376,6 +376,7 @@
           "price_sensor": "Sensor de preu elèctric",
           "export_price_sensor": "Sensor de preu d'injecció/exportació (opcional)",
           "export_price_integration_type": "Integració del preu d'exportació (opcional)",
+          "zonneplan_export_bonus_enabled": "Aplica la bonificació d'exportació de Zonneplan",
           "solar_forecast_sensor": "Sensor de predicció solar (kWh)"
         },
         "data_description": {
@@ -383,6 +384,7 @@
           "price_sensor": "Sensor que proporciona preus horaris d'electricitat",
           "export_price_sensor": "Sensor que proporciona els preus d'injecció. Deixa'l buit per fer servir la corba de preus d'importació, que és el correcte quan la injecció es retribueix al preu d'importació (balanç net).",
           "export_price_integration_type": "Disposició d'atributs del sensor de preu d'exportació. Deixa'l buit per reutilitzar la integració d'importació. Tibber no hi és disponible: està basat en servei i la seva memòria cau pertany a la corba d'importació.",
+          "zonneplan_export_bonus_enabled": "Afegeix 0,02 €/kWh i un 10% només als preus d'exportació de Zonneplan. No té efecte si la integració efectiva del preu d'exportació no és Zonneplan.",
           "solar_forecast_sensor": "Sensor que proporciona la predicció de producció solar en kWh (ex: Solcast). Si tens panells solars, configura'l — el sistema només carregarà des de la xarxa quan la previsió solar sigui insuficient. Si no tens panells, deixa'l buit — el sistema carregarà quan la bateria no tingui energia suficient per al dia. No cal si ja has configurat aquest sensor al pas inicial: s'utilitzarà automàticament."
         }
       },
@@ -687,6 +689,7 @@
       }
     },
     "error": {
+      "invalid_mac": "Això no sembla una adreça MAC. S'esperen sis parelles de dígits hexadecimals, per exemple dc:04:5a:14:6b:33.",
       "cannot_connect": "No es pot connectar a la bateria. Verifica l'adreça IP i que la bateria sigui accessible a la xarxa.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
       "huawei_device_required": "Without direct Modbus writes, Omnibattery controls the battery through the Huawei Solar integration's services, and those address it by device. Either pick the device or enable direct writes.",
@@ -723,6 +726,9 @@
       "missing_activity_sensor": "Selecciona un sensor de dispositiu actiu / càrrega del VE per al Control Dinàmic de Potència o un carregador sense telemetria."
     },
     "abort": {
+      "ip_updated": "L'adreça IP de la bateria ha canviat; la connexió s'ha actualitzat automàticament.",
+      "candidate_silent": "S'ha anunciat una adreça IP nova per a aquesta bateria, però no hi ha res que hi respongui; la connexió no s'ha modificat.",
+      "no_tracked_battery": "Cap bateria configurada està associada a l'adreça MAC d'aquest dispositiu.",
       "already_configured": "Aquesta integració ja està configurada.",
       "reconfigure_successful": "Configuració de connexió de bateria actualitzada correctament.",
       "no_legacy_entries": "No s’ha trobat cap configuració antiga de Marstek Venus per migrar.",
@@ -1091,6 +1097,7 @@
           "price_sensor": "Sensor de preu elèctric",
           "export_price_sensor": "Sensor de preu d'injecció/exportació (opcional)",
           "export_price_integration_type": "Integració del preu d'exportació (opcional)",
+          "zonneplan_export_bonus_enabled": "Aplica la bonificació d'exportació de Zonneplan",
           "solar_forecast_sensor": "Sensor de predicció solar (kWh)"
         },
         "data_description": {
@@ -1098,6 +1105,7 @@
           "price_sensor": "Sensor que proporciona preus horaris d'electricitat",
           "export_price_sensor": "Sensor que proporciona els preus d'injecció. Deixa'l buit per fer servir la corba de preus d'importació, que és el correcte quan la injecció es retribueix al preu d'importació (balanç net).",
           "export_price_integration_type": "Disposició d'atributs del sensor de preu d'exportació. Deixa'l buit per reutilitzar la integració d'importació. Tibber no hi és disponible: està basat en servei i la seva memòria cau pertany a la corba d'importació.",
+          "zonneplan_export_bonus_enabled": "Afegeix 10% i 0,02 €/kWh només als preus d'exportació de Zonneplan. No té efecte si la integració efectiva del preu d'exportació no és Zonneplan.",
           "solar_forecast_sensor": "Sensor que proporciona la predicció de producció solar en kWh (ex: Solcast). Si tens panells solars, configura'l — el sistema només carregarà des de la xarxa quan la previsió solar sigui insuficient. Si no tens panells, deixa'l buit — el sistema carregarà quan la bateria no tingui energia suficient per al dia. No cal si ja has configurat aquest sensor al pas inicial: s'utilitzarà automàticament."
         }
       },
@@ -1292,6 +1300,7 @@
       }
     },
     "error": {
+      "invalid_mac": "Això no sembla una adreça MAC. S'esperen sis parelles de dígits hexadecimals, per exemple dc:04:5a:14:6b:33.",
       "cannot_connect": "No es pot connectar a la bateria. Verifica l'adreça IP i que la bateria sigui accessible a la xarxa.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
       "huawei_device_required": "Without direct Modbus writes, Omnibattery controls the battery through the Huawei Solar integration's services, and those address it by device. Either pick the device or enable direct writes.",
@@ -2349,6 +2358,9 @@
     },
     "exclude_days_too_old": {
       "message": "L'aprenentatge de consum només conserva els darrers {days} dies, així que ja no es pot excloure un dia més antic."
+    },
+    "manual_control_required": {
+      "message": "{battery} està sota control automàtic, així que Force Mode i els punts de consigna de càrrega/descàrrega es reescriuen a cada cicle de control. Activa el mode manual (per a tot el sistema o per a aquesta bateria) abans de donar-li ordres directament."
     }
   },
   "services": {
