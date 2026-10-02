@@ -3905,7 +3905,7 @@ class MarstekVenusPanel extends HTMLElement {
     const EDGES = v2 ? [
       { key: "nGrid", edge: "grid", cap: this._t("grid"), ex: 79.25, ey: 58.98, lx: 90, ly: 83, shape: "hv", gap: 2,
         cable: "58.85,56.22 58.91,76.51 59.81,78.11 79.25,58.98" },
-      { key: "nSolar", edge: "solar", cap: this._t("solar"), ex: 64, ey: 30, lx: 64, ly: 9, shape: "v",
+      { key: "nSolar", edge: "solar", cap: this._t("solar"), ex: 54, ey: 36, lx: 54, ly: 9, shape: "v",
         cable: "48.44,50.48 48.44,39.11" },
       { key: "nHome", edge: "home", cap: this._t("home"), ex: 68, ey: 45, lx: 88, ly: 9, shape: "hv",
         cable: "49.94,53.82 56.42,57.55 57.02,57.78 57.82,57.03 58.85,56.22" },
