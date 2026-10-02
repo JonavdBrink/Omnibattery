@@ -234,6 +234,9 @@ async def test_switching_export_provider_keeps_selection_after_validation_error(
             },
         ),
         "sensor.export": SimpleNamespace(state="0.1", attributes={}),
+        "sensor.forecast": SimpleNamespace(
+            state="5", attributes={"unit_of_measurement": "kWh"}
+        ),
     }
     flow.hass = SimpleNamespace(
         config_entries=SimpleNamespace(
@@ -248,15 +251,28 @@ async def test_switching_export_provider_keeps_selection_after_validation_error(
             "price_sensor": "sensor.import",
             "export_price_sensor": "sensor.export",
             "export_price_integration_type": "zonneplan",
+            "solar_forecast_sensor": "sensor.forecast",
         }
     )
 
+    assert form["type"] == "form"
     assert form["errors"]["export_price_sensor"] == "no_price_data"
     schema = form["data_schema"].schema
     fields = {marker.schema: marker for marker in schema}
     assert "zonneplan_export_bonus_enabled" in fields
+    assert fields["price_integration_type"].default() == "nordpool"
+    assert fields["price_sensor"].default() == "sensor.import"
+    assert fields["export_price_sensor"].description == {
+        "suggested_value": "sensor.export"
+    }
     assert fields["export_price_integration_type"].description == {
         "suggested_value": "zonneplan"
+    }
+    assert fields["zonneplan_export_bonus_enabled"].default() is (
+        DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED
+    )
+    assert fields["solar_forecast_sensor"].description == {
+        "suggested_value": "sensor.forecast"
     }
 
 
