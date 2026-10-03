@@ -356,6 +356,38 @@ async def test_no_skip_when_charge_unchanged_but_not_delivering():
     )
 
 
+async def test_steady_delivery_clears_isolated_zero_samples():
+    """Zendure in manual charge: scattered 0 W telemetry samples between long
+    delivering stretches must not add up to an exclusion, and a battery already
+    excluded must be released as soon as a steady cycle shows it delivering."""
+    coord = _SlowCoordFake({
+        "force_mode": 1, "set_charge_power": 1800, "set_discharge_power": 0,
+        "battery_power": 1800, "battery_soc": 20,
+    })
+    coord.apply_power = AsyncMock(return_value=_ok(1800, confirmed=False))
+    ctrl = _controller()
+    ctrl._non_responsive = NonResponsiveTracker(fail_threshold=3)
+    ctrl._last_commanded_net_sign[coord] = 1  # long-running charge, no engage grace
+    ctrl._attempt_wake = AsyncMock(return_value=False)
+
+    for _ in range(6):  # each glitch is 2 bad cycles, then delivery resumes
+        coord.data["battery_power"] = 0
+        for _ in range(2):
+            await ChargeDischargeController._set_battery_power(ctrl, coord, 1800, 0)
+        coord.data["battery_power"] = 1800
+        await ChargeDischargeController._set_battery_power(ctrl, coord, 1800, 0)
+    assert ctrl._non_responsive.is_excluded(coord) is False
+
+    for _ in range(6):  # a real stall still excludes
+        coord.data["battery_power"] = 0
+        await ChargeDischargeController._set_battery_power(ctrl, coord, 1800, 0)
+    assert ctrl._non_responsive.is_excluded(coord) is True
+
+    coord.data["battery_power"] = 1800
+    await ChargeDischargeController._set_battery_power(ctrl, coord, 1800, 0)
+    assert ctrl._non_responsive.is_excluded(coord) is False
+
+
 async def test_no_record_during_charge_engage_grace():
     coord = _Coord({
         "force_mode": 1,

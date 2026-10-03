@@ -6953,11 +6953,11 @@ class ChargeDischargeController:
                 # only place a silently stalled registerless battery in a pool
                 # surfaces — feed the tracker here so it is EXCLUDED, not just
                 # re-commanded forever (the write below still re-asserts as a nudge).
-                if (
-                    batt_power is not None
-                    and not skip_write
-                    and not hot_path_readback
-                ):
+                # A delivering (skip_write) cycle must reach it too: it is the only
+                # thing that clears the tracker, so without it isolated 0 W samples
+                # pile up across a long steady run into an exclusion, and an
+                # excluded battery that is delivering stays excluded.
+                if batt_power is not None and (skip_write or not hot_path_readback):
                     await self._check_non_delivery(
                         coordinator, abs(net_power), float(batt_power), attempt=0,
                         direction="discharge",
@@ -6969,11 +6969,7 @@ class ChargeDischargeController:
                     and _delivered_toward(data, float(batt_power), is_charge=True)
                     >= 0.10 * net_power
                 )
-                if (
-                    batt_power is not None
-                    and not skip_write
-                    and not hot_path_readback
-                ):
+                if batt_power is not None and (skip_write or not hot_path_readback):
                     await self._check_non_delivery(
                         coordinator, net_power, float(batt_power), attempt=0,
                         direction="charge",
