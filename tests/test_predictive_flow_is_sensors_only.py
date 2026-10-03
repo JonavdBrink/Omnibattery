@@ -58,6 +58,7 @@ async def test_dynamic_pricing_asks_only_for_price_sources():
         "price_sensor",
         "export_price_sensor",
         "export_price_integration_type",
+        "zonneplan_export_bonus_enabled",
         "solar_forecast_sensor",
     }
 

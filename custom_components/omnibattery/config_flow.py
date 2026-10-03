@@ -2720,11 +2720,6 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             if user_input is not None
             else existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
         )
-        effective_export_type = (
-            default_export_type or default_integration
-            if default_export_sensor
-            else default_integration
-        )
 
         schema_dict: dict = {
             vol.Required(CONF_PRICE_INTEGRATION_TYPE, default=default_integration):
@@ -2743,17 +2738,19 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             CONF_EXPORT_PRICE_INTEGRATION_TYPE,
             description={"suggested_value": default_export_type} if default_export_type else {},
         )] = _price_integration_type_selector(_price_integration_export_options())
-        if effective_export_type == PRICE_INTEGRATION_ZONNEPLAN:
-            schema_dict[vol.Optional(
+        # Always shown: the provider is picked in this same form, so hiding it
+        # until Zonneplan is saved meant a second visit. The engine ignores it
+        # unless the export curve is Zonneplan.
+        schema_dict[vol.Optional(
+            CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+            default=form_input.get(
                 CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                default=form_input.get(
+                existing_config.get(
                     CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                    existing_config.get(
-                        CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                        DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                    ),
+                    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
                 ),
-            )] = BooleanSelector()
+            ),
+        )] = BooleanSelector()
         if not _has_global_forecast_sensor(existing_config):
             default_forecast = (
                 form_input.get("solar_forecast_sensor")
@@ -5472,11 +5469,6 @@ class OptionsFlowHandler(OptionsFlow):
             if user_input is not None
             else existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
         )
-        effective_export_type = (
-            default_export_type or default_integration
-            if default_export_sensor
-            else default_integration
-        )
 
         schema_dict: dict = {
             vol.Required(CONF_PRICE_INTEGRATION_TYPE, default=default_integration):
@@ -5495,17 +5487,19 @@ class OptionsFlowHandler(OptionsFlow):
             CONF_EXPORT_PRICE_INTEGRATION_TYPE,
             description={"suggested_value": default_export_type} if default_export_type else {},
         )] = _price_integration_type_selector(_price_integration_export_options())
-        if effective_export_type == PRICE_INTEGRATION_ZONNEPLAN:
-            schema_dict[vol.Optional(
+        # Always shown: the provider is picked in this same form, so hiding it
+        # until Zonneplan is saved meant a second visit. The engine ignores it
+        # unless the export curve is Zonneplan.
+        schema_dict[vol.Optional(
+            CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+            default=form_input.get(
                 CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                default=form_input.get(
+                existing_config.get(
                     CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                    existing_config.get(
-                        CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                        DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
-                    ),
+                    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
                 ),
-            )] = BooleanSelector()
+            ),
+        )] = BooleanSelector()
         if not _has_global_forecast_sensor(existing_config):
             default_forecast = (
                 form_input.get("solar_forecast_sensor")

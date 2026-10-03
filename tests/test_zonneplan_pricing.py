@@ -154,49 +154,26 @@ def test_shared_export_selector_and_validation():
     assert _validate_price_sensor(hass, "sensor.export", "zonneplan", allow_service_cache=False) is None
 
 
-@pytest.mark.parametrize(
-    "config_data, expected_visible",
-    [
-        ({"price_integration_type": "zonneplan"}, True),
-        ({"price_integration_type": "tibber"}, False),
-        (
-            {
-                "price_integration_type": "nordpool",
-                "export_price_sensor": "sensor.export",
-                "export_price_integration_type": "zonneplan",
-            },
-            True,
-        ),
-        (
-            {
-                "price_integration_type": "tibber",
-                "export_price_integration_type": "zonneplan",
-            },
-            False,
-        ),
-        (
-            {
-                "price_integration_type": "zonneplan",
-                "export_price_sensor": "sensor.export",
-                "export_price_integration_type": "nordpool",
-            },
-            False,
-        ),
-    ],
-)
-async def test_zonneplan_export_bonus_setting_visibility(config_data, expected_visible):
-    from custom_components.omnibattery.config_flow import OptionsFlowHandler
+@pytest.mark.parametrize("options", [False, True])
+async def test_zonneplan_export_bonus_shown_before_zonneplan_is_saved(options):
+    """A fresh setup still on the Nordpool default must offer the bonus in the
+    same form where Zonneplan gets picked, not only after a second visit."""
+    from custom_components.omnibattery.config_flow import (
+        MarstekVenusConfigFlow,
+        OptionsFlowHandler,
+    )
 
-    config_entry = SimpleNamespace(entry_id="test", data=config_data, options={})
-    flow = OptionsFlowHandler(config_entry)
+    config_entry = SimpleNamespace(entry_id="test", data={}, options={})
+    flow = OptionsFlowHandler(config_entry) if options else MarstekVenusConfigFlow()
     flow.handler = "test"
     flow.hass = SimpleNamespace(
         config_entries=SimpleNamespace(async_get_known_entry=lambda _: config_entry),
         states=SimpleNamespace(get=lambda _: None),
     )
     form = await flow.async_step_dynamic_pricing_config()
-    fields = {marker.schema for marker in form["data_schema"].schema}
-    assert ("zonneplan_export_bonus_enabled" in fields) is expected_visible
+    fields = {marker.schema: marker for marker in form["data_schema"].schema}
+    assert fields["price_integration_type"].default() == "nordpool"
+    assert fields["zonneplan_export_bonus_enabled"].default() is False
 
 
 @pytest.mark.parametrize("options", [False, True])
