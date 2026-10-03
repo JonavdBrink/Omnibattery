@@ -6,12 +6,17 @@
 
 - **New energy-flow diagram drawn on the house's cables**, now the default, with the old one still one click away in the card header (choice remembered per browser). EV chargers get their own cable: mark them with the new **EV charger** option on each excluded device (diagram only, no control change); a one-time Repair asks existing setups to do so.
 
+### Changed
+
+- **Hourly Balance Target and Deadband sliders now move in 0.05 kWh steps** (was 0.1), matching the two-decimal net balance sensor.
+
 ### Fixed
 
 - **LilyGo/ESPHome: Backup Function no longer keeps the battery excluded forever** (#534): the driver now reads **AC Offgrid Power** (register 32302); the stock YAML lacks it, so the docs give the block to add, and a warning names it when missing. Thanks to @Reinvented0.
 - **High Price Sale no longer goes unavailable from sunrise until the next day's prices are published** (#530): the night after the last published price now counts as protected demand with no price — never sold into or used as a buy-back — so trigger 2 can still sell a morning peak against cheaper demand later the same day. Trigger 1 still waits for tomorrow's prices. Thanks to @RobtoCopter.
 - **Re-evaluate button no longer fails with a template-recalculated Nordpool sensor**: `raw_today`/`raw_tomorrow` start/end rendered as text crashed with `'>' not supported between 'str' and 'datetime'`; they are now parsed as datetimes.
 - **Minimum relay time no longer holds a battery at minimum power forever**: a control pass without a new meter sample restarted the 30 s shut-off timer, so a Zendure kept charging at 400 W on a ~300 W surplus indefinitely.
+- **A battery that is charging or discharging is no longer excluded as `non_delivery`**: steady cycles never reset the fail counter, so brief 0 W telemetry dips (Zendure) added up over hours into an exclusion, which then lasted the full cooldown while the battery kept delivering.
 - **Venus A/D: a pack removed or added at runtime no longer needs a reload**: a removed slot kept reading 0 %, blocking discharge on a battery at 72 %. The BMS online-pack mask (32110) now decides which packs are polled (#526). Thanks to @sphings79.
 
 ## [1.5.0b5] - 2026-09-28
