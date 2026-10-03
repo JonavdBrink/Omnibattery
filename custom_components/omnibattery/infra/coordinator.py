@@ -838,6 +838,26 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         """
         return self.brand == "marstek" and self.battery_version in ("v2", "v3")
 
+    def readings_from_same_poll(self, key_a: str, key_b: str) -> bool:
+        """Whether two keys were last stored by the same poll cycle.
+
+        Read groups are polled and merged into ``data`` independently: a group
+        whose read fails keeps its previous value in ``data``. Every group read
+        in one cycle shares the cycle's timestamp, so equal timestamps mean both
+        values came from the same poll. Anything else, including a key that has
+        never been read, is not a match.
+        """
+        times = []
+        for key in (key_a, key_b):
+            stamp = next(
+                (ts for keys, ts in self._last_update_times.items() if key in keys),
+                None,
+            )
+            if stamp is None:
+                return False
+            times.append(stamp)
+        return times[0] == times[1]
+
     @property
     def is_available(self) -> bool:
         """Return whether the battery is currently reachable."""

@@ -4472,8 +4472,15 @@ class ChargeDischargeController:
         # connected there reads as off-grid power although the battery supplies
         # nothing. Only a real outage (backup state) means the battery is
         # feeding the port, so treat the port as idle here and let the normal
-        # post-backup cooldown run out.
-        if _inverter_in_ac_bypass(coordinator.data.get("inverter_state")):
+        # post-backup cooldown run out. The two values are read in separate
+        # register groups, and a failed read leaves the old value in place, so a
+        # stale Bypass must not hide a fresh port load: only trust it when both
+        # came from the same poll.
+        if _inverter_in_ac_bypass(
+            coordinator.data.get("inverter_state")
+        ) and coordinator.readings_from_same_poll(
+            "inverter_state", "ac_offgrid_power"
+        ):
             ac_offgrid = 0
 
         # Small permanent loads (e.g. a PoE switch, router, or AP connected to the
