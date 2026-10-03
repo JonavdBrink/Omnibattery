@@ -382,6 +382,7 @@
           "price_sensor": "Sensor de precio eléctrico",
           "export_price_sensor": "Sensor de precio de inyección/exportación (opcional)",
           "export_price_integration_type": "Integración del precio de exportación (opcional)",
+          "zonneplan_export_bonus_enabled": "Aplicar la bonificación de exportación de Zonneplan",
           "solar_forecast_sensor": "Sensor de predicción solar (kWh)"
         },
         "data_description": {
@@ -389,6 +390,7 @@
           "price_sensor": "Sensor de precios (por ejemplo, el sensor de precio actual de Nord Pool oficial, un sensor Nordpool de HACS, sensor.esios_pvpc o tu sensor de CKW)",
           "export_price_sensor": "Sensor que proporciona los precios de inyección. Déjalo vacío para usar la curva de precios de importación, que es lo correcto cuando la inyección se retribuye al precio de importación (balance neto).",
           "export_price_integration_type": "Disposición de atributos del sensor de precio de exportación. Déjalo vacío para reutilizar la integración de importación. Tibber no está disponible aquí: está basado en servicio y su caché pertenece a la curva de importación.",
+          "zonneplan_export_bonus_enabled": "Añade 0,02 €/kWh y un 10% solo a los precios de exportación de Zonneplan. No tiene efecto si la integración efectiva del precio de exportación no es Zonneplan.",
           "solar_forecast_sensor": "Sensor que proporciona la predicción de producción solar en kWh (ej: Solcast). Si tienes paneles solares, configúralo — el sistema solo cargará desde la red cuando la previsión solar sea insuficiente. Si no tienes paneles, déjalo vacío — el sistema cargará cuando la batería no tenga energía suficiente para el día. No es necesario si ya configuraste este sensor en el paso inicial: se usará automáticamente."
         }
       },
@@ -693,6 +695,7 @@
       }
     },
     "error": {
+      "invalid_mac": "Eso no parece una dirección MAC. Se esperan seis pares de dígitos hexadecimales, por ejemplo dc:04:5a:14:6b:33.",
       "cannot_connect": "No se puede conectar a la batería. Verifica la dirección IP y que la batería esté accesible en la red.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
       "huawei_device_required": "Without direct Modbus writes, Omnibattery controls the battery through the Huawei Solar integration's services, and those address it by device. Either pick the device or enable direct writes.",
@@ -729,6 +732,9 @@
       "missing_activity_sensor": "Selecciona un sensor de dispositivo activo / carga del VE para Control Dinámico de Potencia o un cargador sin telemetría."
     },
     "abort": {
+      "ip_updated": "La dirección IP de la batería ha cambiado; la conexión se actualizó automáticamente.",
+      "candidate_silent": "Se ha anunciado una nueva dirección IP para esta batería, pero no responde nada allí; la conexión se ha dejado sin cambios.",
+      "no_tracked_battery": "Ninguna batería configurada está asociada a la dirección MAC de este dispositivo.",
       "already_configured": "Esta integración ya está configurada.",
       "reconfigure_successful": "Configuración de conexión de batería actualizada correctamente.",
       "no_legacy_entries": "No se encontró ninguna configuración antigua de Marstek Venus para migrar.",
@@ -1099,6 +1105,7 @@
           "price_sensor": "Sensor de precio eléctrico",
           "export_price_sensor": "Sensor de precio de inyección/exportación (opcional)",
           "export_price_integration_type": "Integración del precio de exportación (opcional)",
+          "zonneplan_export_bonus_enabled": "Aplicar la bonificación de exportación de Zonneplan",
           "solar_forecast_sensor": "Sensor de predicción solar (kWh)"
         },
         "data_description": {
@@ -1106,6 +1113,7 @@
           "price_sensor": "Sensor de precios (por ejemplo, el sensor de precio actual de Nord Pool oficial, un sensor Nordpool de HACS, sensor.esios_pvpc o tu sensor de CKW)",
           "export_price_sensor": "Sensor que proporciona los precios de inyección. Déjalo vacío para usar la curva de precios de importación, que es lo correcto cuando la inyección se retribuye al precio de importación (balance neto).",
           "export_price_integration_type": "Disposición de atributos del sensor de precio de exportación. Déjalo vacío para reutilizar la integración de importación. Tibber no está disponible aquí: está basado en servicio y su caché pertenece a la curva de importación.",
+          "zonneplan_export_bonus_enabled": "Añade un 10% y 0,02 €/kWh solo a los precios de exportación de Zonneplan. No tiene efecto si la integración efectiva del precio de exportación no es Zonneplan.",
           "solar_forecast_sensor": "Sensor que proporciona la predicción de producción solar en kWh (ej: Solcast). Si tienes paneles solares, configúralo — el sistema solo cargará desde la red cuando la previsión solar sea insuficiente. Si no tienes paneles, déjalo vacío — el sistema cargará cuando la batería no tenga energía suficiente para el día. No es necesario si ya configuraste este sensor en el paso inicial: se usará automáticamente."
         }
       },
@@ -1300,6 +1308,7 @@
       }
     },
     "error": {
+      "invalid_mac": "Eso no parece una dirección MAC. Se esperan seis pares de dígitos hexadecimales, por ejemplo dc:04:5a:14:6b:33.",
       "cannot_connect": "No se puede conectar a la batería. Verifica la dirección IP y que la batería esté accesible en la red.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
       "huawei_device_required": "Without direct Modbus writes, Omnibattery controls the battery through the Huawei Solar integration's services, and those address it by device. Either pick the device or enable direct writes.",
@@ -2357,6 +2366,9 @@
     },
     "exclude_days_too_old": {
       "message": "El aprendizaje de consumo solo conserva los últimos {days} días, así que ya no es posible excluir un día más antiguo."
+    },
+    "manual_control_required": {
+      "message": "{battery} está bajo control automático, así que Force Mode y las consignas de carga/descarga se sobrescriben en cada ciclo de control. Activa el modo manual (para todo el sistema o para esta batería) antes de enviarle órdenes directamente."
     }
   },
   "services": {

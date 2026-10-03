@@ -9,7 +9,12 @@ cannot do.
 
 from types import SimpleNamespace
 
-from custom_components.omnibattery.config_flow import OptionsFlowHandler
+import pytest
+
+from custom_components.omnibattery.config_flow import (
+    MarstekVenusConfigFlow,
+    OptionsFlowHandler,
+)
 
 
 def _schema_keys(result) -> set[str]:
@@ -30,6 +35,18 @@ def _flow(data: dict) -> OptionsFlowHandler:
             async_entries=lambda _domain: [],
         ),
     )
+    return flow
+
+
+def _flow_with_states(data: dict, states: dict, options: bool):
+    if options:
+        flow = _flow(data)
+        flow.hass.states = SimpleNamespace(get=states.get)
+    else:
+        flow = MarstekVenusConfigFlow()
+        flow.config_data.update(data)
+        flow.handler = "test-entry"
+        flow.hass = SimpleNamespace(states=SimpleNamespace(get=states.get))
     return flow
 
 
@@ -80,3 +97,74 @@ async def test_submitting_leaves_the_entity_owned_keys_alone():
 
     assert "max_price_threshold" not in flow.config_data
     assert "predischarge_reserve_soc" not in flow.config_data
+
+
+@pytest.mark.parametrize("options", [False, True])
+async def test_time_slot_validation_preserves_submitted_values(options):
+    states = {
+        "sensor.forecast": SimpleNamespace(
+            state="5", attributes={"unit_of_measurement": "kWh"}
+        )
+    }
+    flow = _flow_with_states(
+        {"charging_time_slot": {"start_time": "22:00", "end_time": "23:00", "days": ["mon"]}},
+        states,
+        options,
+    )
+
+    form = await flow.async_step_predictive_charging_config(
+        {
+            "start_time": "01:00",
+            "end_time": "02:00",
+            "days": ["tue"],
+            "start_time_2": "03:00",
+            "solar_forecast_sensor": "sensor.forecast",
+        }
+    )
+
+    assert form["type"] == "form"
+    assert form["errors"]["start_time_2"] == "incomplete_window"
+    fields = {marker.schema: marker for marker in form["data_schema"].schema}
+    assert fields["start_time"].default() == "01:00"
+    assert fields["end_time"].default() == "02:00"
+    assert fields["days"].default() == ["tue"]
+    assert fields["start_time_2"].default() == "03:00"
+    assert fields["solar_forecast_sensor"].description == {
+        "suggested_value": "sensor.forecast"
+    }
+
+
+@pytest.mark.parametrize("options", [False, True])
+async def test_realtime_price_validation_preserves_submitted_values(options):
+    states = {
+        "sensor.forecast": SimpleNamespace(
+            state="5", attributes={"unit_of_measurement": "kWh"}
+        )
+    }
+    flow = _flow_with_states(
+        {
+            "price_sensor": "sensor.old_price",
+            "average_price_sensor": "sensor.old_average",
+        },
+        states,
+        options,
+    )
+
+    form = await flow.async_step_realtime_price_config(
+        {
+            "price_sensor": "sensor.new_price",
+            "average_price_sensor": "sensor.new_average",
+            "solar_forecast_sensor": "sensor.forecast",
+        }
+    )
+
+    assert form["type"] == "form"
+    assert form["errors"]["price_sensor"] == "sensor_not_found"
+    fields = {marker.schema: marker for marker in form["data_schema"].schema}
+    assert fields["price_sensor"].default() == "sensor.new_price"
+    assert fields["average_price_sensor"].description == {
+        "suggested_value": "sensor.new_average"
+    }
+    assert fields["solar_forecast_sensor"].description == {
+        "suggested_value": "sensor.forecast"
+    }

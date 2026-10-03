@@ -5,6 +5,7 @@
 ### Added
 
 - **New energy-flow diagram drawn on the house's cables**, now the default, with the old one still one click away in the card header (choice remembered per browser). EV chargers get their own cable: mark them with the new **EV charger** option on each excluded device (diagram only, no control change); a one-time Repair asks existing setups to do so.
+- **Zonneplan export bonus (zonnebonus)** (opt-in, off by default): adds €0.02/kWh plus 10% to the Zonneplan export price curve; it never touches the import price when no export sensor is set. Thanks to @JonavdBrink.
 
 ### Changed
 
@@ -12,6 +13,7 @@
 
 ### Fixed
 
+- **Configuration forms keep what you entered after a validation error** instead of resetting every field. Thanks to @JonavdBrink.
 - **LilyGo/ESPHome: Backup Function no longer keeps the battery excluded forever** (#534): the driver now reads **AC Offgrid Power** (register 32302); the stock YAML lacks it, so the docs give the block to add, and a warning names it when missing. Thanks to @Reinvented0.
 - **High Price Sale no longer goes unavailable from sunrise until the next day's prices are published** (#530): the night after the last published price now counts as protected demand with no price — never sold into or used as a buy-back — so trigger 2 can still sell a morning peak against cheaper demand later the same day. Trigger 1 still waits for tomorrow's prices. Thanks to @RobtoCopter.
 - **Re-evaluate button no longer fails with a template-recalculated Nordpool sensor**: `raw_today`/`raw_tomorrow` start/end rendered as text crashed with `'>' not supported between 'str' and 'datetime'`; they are now parsed as datetimes.

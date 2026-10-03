@@ -382,6 +382,7 @@
           "price_sensor": "Preissensor",
           "export_price_sensor": "Sensor für Einspeise-/Exportpreise (optional)",
           "export_price_integration_type": "Integration für den Exportpreis (optional)",
+          "zonneplan_export_bonus_enabled": "Zonneplan-Einspeisebonus anwenden",
           "solar_forecast_sensor": "Solarprognose-Sensor (kWh)"
         },
         "data_description": {
@@ -389,6 +390,7 @@
           "price_sensor": "Sensor, der stündliche Strompreise enthält (z.B. sensor.nordpool_kwh_de_eur_3_10_025)",
           "export_price_sensor": "Sensor, der die Einspeisevergütung liefert. Leer lassen, um die Importpreiskurve zu verwenden — das ist korrekt, wenn die Einspeisung zum Importpreis vergütet wird (Net Metering).",
           "export_price_integration_type": "Attributaufbau des Exportpreis-Sensors. Leer lassen, um die Import-Integration zu übernehmen. Tibber steht hier nicht zur Verfügung: Es ist dienstbasiert und sein Cache gehört zur Importkurve.",
+          "zonneplan_export_bonus_enabled": "Addiert ausschließlich zu Zonneplan-Einspeisepreisen 0,02 €/kWh und 10 %. Hat keine Wirkung, wenn die tatsächlich verwendete Exportpreisintegration nicht Zonneplan ist.",
           "solar_forecast_sensor": "Sensor, der die Solarproduktionsprognose in kWh liefert (z.B. Solcast). Mit Solaranlage: konfigurieren — das System lädt nur dann aus dem Netz, wenn die Solarprognose unzureichend ist. Ohne Solaranlage: leer lassen — das System lädt, wenn die Batterieenergie für den Tag nicht ausreicht. Nicht erforderlich, wenn dieser Sensor bereits im ersten Schritt konfiguriert wurde — er wird automatisch verwendet."
         }
       },
@@ -693,6 +695,7 @@
       }
     },
     "error": {
+      "invalid_mac": "Das sieht nicht wie eine MAC-Adresse aus. Erwartet werden sechs Paare hexadezimaler Ziffern, zum Beispiel dc:04:5a:14:6b:33.",
       "cannot_connect": "Verbindung zur Batterie nicht möglich. Überprüfen Sie die IP-Adresse und dass die Batterie im Netzwerk erreichbar ist.",
       "no_battery": "Wechselrichter erreichbar, meldet aber keine Batterie. Prüfe, ob die LUNA2000 angeschlossen ist und die Modbus-Slave-ID auf den Wechselrichter zeigt.",
       "huawei_device_required": "Ohne direkte Modbus-Schreibzugriffe steuert Omnibattery die Batterie über die Dienste der Huawei-Solar-Integration, und die sprechen das Batteriegerät an. Wähle also entweder das Gerät aus oder aktiviere die direkten Schreibzugriffe.",
@@ -729,6 +732,9 @@
       "missing_activity_sensor": "Wähle für die dynamische Leistungsregelung oder eine EV-Ladestation ohne Telemetrie einen Sensor Gerät aktiv / EV-Ladestatus."
     },
     "abort": {
+      "ip_updated": "Die IP-Adresse der Batterie hat sich geändert; die Verbindung wurde automatisch aktualisiert.",
+      "candidate_silent": "Für diese Batterie wurde eine neue IP-Adresse angekündigt, aber dort antwortet nichts; die Verbindung blieb unverändert.",
+      "no_tracked_battery": "Keine konfigurierte Batterie wird über die MAC-Adresse dieses Geräts verfolgt.",
       "already_configured": "Diese Integration ist bereits konfiguriert.",
       "reconfigure_successful": "Verbindungseinstellungen der Batterie erfolgreich aktualisiert.",
       "no_legacy_entries": "Es wurde keine ältere Marstek Venus-Konfiguration zum Migrieren gefunden.",
@@ -1099,6 +1105,7 @@
           "price_sensor": "Preissensor",
           "export_price_sensor": "Sensor für Einspeise-/Exportpreise (optional)",
           "export_price_integration_type": "Integration für den Exportpreis (optional)",
+          "zonneplan_export_bonus_enabled": "Zonneplan-Einspeisebonus anwenden",
           "solar_forecast_sensor": "Solarprognose-Sensor (kWh)"
         },
         "data_description": {
@@ -1106,6 +1113,7 @@
           "price_sensor": "Sensor, der stündliche Strompreise enthält (z.B. sensor.nordpool_kwh_de_eur_3_10_025)",
           "export_price_sensor": "Sensor, der die Einspeisevergütung liefert. Leer lassen, um die Importpreiskurve zu verwenden — das ist korrekt, wenn die Einspeisung zum Importpreis vergütet wird (Net Metering).",
           "export_price_integration_type": "Attributaufbau des Exportpreis-Sensors. Leer lassen, um die Import-Integration zu übernehmen. Tibber steht hier nicht zur Verfügung: Es ist dienstbasiert und sein Cache gehört zur Importkurve.",
+          "zonneplan_export_bonus_enabled": "Addiert ausschließlich zu Zonneplan-Einspeisepreisen 10 % und 0,02 €/kWh. Hat keine Wirkung, wenn die tatsächlich verwendete Exportpreisintegration nicht Zonneplan ist.",
           "solar_forecast_sensor": "Sensor, der die Solarproduktionsprognose in kWh liefert (z.B. Solcast). Mit Solaranlage: konfigurieren — das System lädt nur dann aus dem Netz, wenn die Solarprognose unzureichend ist. Ohne Solaranlage: leer lassen — das System lädt, wenn die Batterieenergie für den Tag nicht ausreicht. Nicht erforderlich, wenn dieser Sensor bereits im ersten Schritt konfiguriert wurde — er wird automatisch verwendet."
         }
       },
@@ -1300,6 +1308,7 @@
       }
     },
     "error": {
+      "invalid_mac": "Das sieht nicht wie eine MAC-Adresse aus. Erwartet werden sechs Paare hexadezimaler Ziffern, zum Beispiel dc:04:5a:14:6b:33.",
       "cannot_connect": "Verbindung zur Batterie nicht möglich. Überprüfen Sie die IP-Adresse und dass die Batterie im Netzwerk erreichbar ist.",
       "no_battery": "Wechselrichter erreichbar, meldet aber keine Batterie. Prüfe, ob die LUNA2000 angeschlossen ist und die Modbus-Slave-ID auf den Wechselrichter zeigt.",
       "huawei_device_required": "Ohne direkte Modbus-Schreibzugriffe steuert Omnibattery die Batterie über die Dienste der Huawei-Solar-Integration, und die sprechen das Batteriegerät an. Wähle also entweder das Gerät aus oder aktiviere die direkten Schreibzugriffe.",
@@ -2357,6 +2366,9 @@
     },
     "exclude_days_too_old": {
       "message": "Das Verbrauchslernen behält nur die letzten {days} Tage, ein älterer Tag kann daher nicht mehr ausgeschlossen werden."
+    },
+    "manual_control_required": {
+      "message": "{battery} wird automatisch gesteuert, daher werden der Force-Modus und die Lade-/Entlade-Sollwerte bei jedem Steuerungszyklus überschrieben. Aktiviere den manuellen Modus (systemweit oder für diese Batterie), bevor du direkt Befehle sendest."
     }
   },
   "services": {

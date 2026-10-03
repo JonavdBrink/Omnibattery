@@ -37,6 +37,9 @@ from ..const import (
     PRICE_INTEGRATION_EPEX,
     PRICE_INTEGRATION_ENTSOE,
     PRICE_INTEGRATION_TIBBER,
+    PRICE_INTEGRATION_ZONNEPLAN,
+    ZONNEPLAN_EXPORT_BONUS_RATE,
+    ZONNEPLAN_EXPORT_BONUS_FIXED_EUR_PER_KWH,
     NORDPOOL_REFRESH_MINUTES,
     TIBBER_REFRESH_MINUTES,
     PREDICTIVE_MODE_DYNAMIC_PRICING,
@@ -931,7 +934,26 @@ class PricingManager:
         raw_slots = self._parse_sensor_price_slots(
             entity_id, integration_type, quiet=True
         )
-        return self._filter_future_slots(raw_slots, horizon_end)
+        slots = self._filter_future_slots(raw_slots, horizon_end)
+        return self._apply_zonneplan_export_bonus(slots, integration_type)
+
+    def _apply_zonneplan_export_bonus(self, slots: list, integration_type: str) -> list:
+        """Apply Zonneplan's optional export bonus without changing imports."""
+        controller = self._controller
+        if (
+            integration_type != PRICE_INTEGRATION_ZONNEPLAN
+            or not getattr(controller, "zonneplan_export_bonus_enabled", False)
+        ):
+            return slots
+        return [
+            slot._replace(
+                price=(
+                    slot.price * (1 + ZONNEPLAN_EXPORT_BONUS_RATE)
+                    + ZONNEPLAN_EXPORT_BONUS_FIXED_EUR_PER_KWH
+                )
+            )
+            for slot in slots
+        ]
 
     def _parse_sensor_price_slots(
         self, entity_id: str, integration_type: str, *, quiet: bool = False
