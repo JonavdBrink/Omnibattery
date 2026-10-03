@@ -143,6 +143,20 @@ def test_match_entities_includes_lilygo_diagnostics():
     assert resolved["esp_wifi_status"] == "binary_sensor.marstek_esp_wifi_status"
 
 
+@pytest.mark.asyncio
+async def test_ac_offgrid_power_is_resolved_read_and_polled():
+    """#534: without it Backup Function excludes the battery forever."""
+    resolved = EsphomeEntityDriver._match_entities(
+        [("sensor", "AC Offgrid Power", "sensor.marstek_ac_offgrid_power")]
+    )
+    assert resolved["ac_offgrid_power"] == "sensor.marstek_ac_offgrid_power"
+
+    driver = EsphomeEntityDriver(_hass({"sensor.marstek_ac_offgrid_power": "0"}), "dev")
+    driver._entities = resolved
+    assert await driver.read_telemetry() == {"ac_offgrid_power": 0}
+    assert "ac_offgrid_power" in driver.read_groups[0].keys
+
+
 def test_legacy_force_mode_option_names_are_still_decoded():
     assert EsphomeEntityDriver._decode("force_mode", "stop") == 0
     assert EsphomeEntityDriver._decode("force_mode", "standby") == 0

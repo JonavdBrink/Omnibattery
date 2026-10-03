@@ -85,6 +85,9 @@ _ENTITY_MAP: dict[str, tuple[str, str]] = {
     "battery_voltage":                ("sensor", "Battery Voltage"),
     "battery_total_energy":           ("sensor", "Battery Total Energy"),
     "ac_power":                       ("sensor", "AC Power"),
+    # Not in the stock firmware YAML (register 32302); the user adds it under
+    # this name. Without it Backup Function keeps the battery excluded (#534).
+    "ac_offgrid_power":               ("sensor", "AC Offgrid Power"),
     "internal_temperature":           ("sensor", "Internal Temperature"),
     "max_cell_voltage":               ("sensor", "Max. Cell Voltage"),
     "min_cell_voltage":               ("sensor", "Min. Cell Voltage"),
@@ -238,6 +241,9 @@ SENSOR_DEFINITIONS: list[dict] = [
      "category": "diagnostic", "scale": 1, "precision": 1,
      "scan_interval": "medium", "enabled_by_default": True},
     {"name": "AC Power", "key": "ac_power", "unit": "W",
+     "device_class": "power", "state_class": "measurement",
+     "scale": 1, "precision": 0, "scan_interval": "high", "enabled_by_default": True},
+    {"name": "AC Offgrid Power", "key": "ac_offgrid_power", "unit": "W",
      "device_class": "power", "state_class": "measurement",
      "scale": 1, "precision": 0, "scan_interval": "high", "enabled_by_default": True},
     {"name": "Total Charging Energy", "key": "total_charging_energy", "unit": "kWh",
@@ -407,6 +413,7 @@ class EsphomeEntityDriver(BatteryDriver):
         self._entities: dict[str, str] = {}
         self._stale_after_s = stale_after_s
         self._bus_stalled = False
+        self._warned_no_offgrid = False
 
         self._capabilities = DriverCapabilities(
             hardware_soc_cutoff=True,     # cutoff registers exposed as numbers
@@ -569,6 +576,14 @@ class EsphomeEntityDriver(BatteryDriver):
             self._connected = False
             return False
         self._entities = resolved
+        if "ac_offgrid_power" not in resolved and not self._warned_no_offgrid:
+            self._warned_no_offgrid = True
+            _LOGGER.warning(
+                "ESPHome device %s has no 'AC Offgrid Power' entity (register "
+                "32302). With Backup Function enabled the battery stays "
+                "excluded from control; add the sensor to the LilyGo YAML.",
+                self._device_id,
+            )
 
         soc_state = self.hass.states.get(resolved["battery_soc"])
         if soc_state is None or soc_state.state in ("unavailable", "unknown"):

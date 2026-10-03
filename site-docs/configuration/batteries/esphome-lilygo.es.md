@@ -44,6 +44,7 @@ A diferencia de una conexión Modbus directa, Omnibattery no se comunica con la 
 | La configuración termina pero la batería no está disponible | El puente está en línea, pero **Battery State Of Charge** es `unknown` o `unavailable` | Comprueba que la batería y el puente se comunican y espera un valor de SOC utilizable |
 | Las órdenes no tienen efecto | Falta una entidad de control ESPHome requerida o el puente no llega a la batería | Comprueba **Forcible Charge-Discharge**, **Forcible Charge Power**, **Forcible Discharge Power** y **RS485 Control Mode** en el dispositivo ESPHome |
 | Los valores dejan de cambiar mientras la placa sigue pareciendo en línea | Se ha detenido el sondeo de batería del puente | Comprueba los registros de ESPHome y la conexión RS-485; Omnibattery deja de usar telemetría de batería obsoleta en lugar de controlar con valores antiguos |
+| Con **Backup Function** activado, el estado se queda en `backup_mode` y la batería nunca se controla | El firmware no publica **AC Offgrid Power** (registro 32302), así que Omnibattery no puede saber si el puerto off-grid está en uso y mantiene la batería excluida | Añade el sensor de abajo al YAML de LilyGo o desactiva **Backup Function** |
 
 ??? "Detalles avanzados"
     Omnibattery identifica esta conexión por el dispositivo ESPHome de Home Assistant seleccionado, no por una dirección IP o extremo Modbus. El puente controla la conexión RS-485, por lo que esta vía no tiene una vía Modbus directa paralela.
@@ -51,3 +52,21 @@ A diferencia de una conexión Modbus directa, Omnibattery no se comunica con la 
     La coincidencia de entidades usa el nombre original del registro de entidades ESPHome, convertido a un slug. Por tanto, renombrar un ID de entidad en Home Assistant normalmente no rompe la coincidencia. Los nombres de entidad estándar requeridos son **Battery State Of Charge**, **Battery Power**, **AC Power**, **Forcible Charge-Discharge**, **Forcible Charge Power**, **Forcible Discharge Power** y **RS485 Control Mode**.
 
     Las órdenes usan los servicios `select.select_option` y `number.set_value` de Home Assistant. El puente sondea la batería aproximadamente cada 3 segundos; Omnibattery trata toda la telemetría procedente de la batería como obsoleta tras 120 segundos sin ningún informe, incluso si las entidades Wi-Fi locales de ESP siguen actualizándose.
+
+??? "Sensor de potencia off-grid para Backup Function"
+    El YAML estándar del firmware no lee el registro 32302. Añade este bloque a tu YAML de LilyGo, con el nombre exactamente como está escrito, y recarga Omnibattery:
+
+    ```yaml
+    sensor:
+      - name: "AC Offgrid Power"
+        id: "ac_offgrid_power"
+        platform: modbus_controller
+        modbus_controller_id: mt
+        register_type: holding
+        address: 32302
+        value_type: S_DWORD
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        accuracy_decimals: 0
+    ```

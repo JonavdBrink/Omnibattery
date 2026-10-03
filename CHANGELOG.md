@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- **LilyGo/ESPHome: Backup Function no longer keeps the battery excluded forever** (#534): the driver now reads **AC Offgrid Power** (register 32302); the stock YAML lacks it, so the docs give the block to add, and a warning names it when missing. Thanks to @Reinvented0.
 - **High Price Sale no longer goes unavailable from sunrise until the next day's prices are published** (#530): the night after the last published price now counts as protected demand with no price — never sold into or used as a buy-back — so trigger 2 can still sell a morning peak against cheaper demand later the same day. Trigger 1 still waits for tomorrow's prices. Thanks to @RobtoCopter.
 - **Re-evaluate button no longer fails with a template-recalculated Nordpool sensor**: `raw_today`/`raw_tomorrow` start/end rendered as text crashed with `'>' not supported between 'str' and 'datetime'`; they are now parsed as datetimes.
 - **Minimum relay time no longer holds a battery at minimum power forever**: a control pass without a new meter sample restarted the 30 s shut-off timer, so a Zendure kept charging at 400 W on a ~300 W surplus indefinitely.
