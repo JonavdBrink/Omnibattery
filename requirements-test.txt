@@ -1,5 +1,6 @@
-# Test dependencies. Install into a Python 3.12/3.13 venv:
-#   py -3.12 -m venv .venv-test
+# Test dependencies. Install into a Python 3.14 venv (the version HA runs;
+# 3.14 evaluates annotations lazily, which older versions cannot catch):
+#   py -3.14 -m venv .venv-test
 #   .venv-test\Scripts\python -m pip install -r requirements-test.txt
 #   .venv-test\Scripts\python -m pytest
 #
