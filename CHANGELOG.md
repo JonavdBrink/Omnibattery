@@ -62,6 +62,7 @@
 - **Phase-sensor events respect the control-cycle pacing**, so a fast P1 no longer floods slow bridges (#452).
 - **Minimum relay time no longer holds a battery at minimum power forever.**
 - **A frozen ESPHome bridge is no longer mistaken for a working one** (#452). Thanks to @mhjansen79.
+- **Backup Function no longer keeps a Venus excluded while the grid is present** (#540): in Bypass a load on the backup port read as an outage; the port now counts as idle while the inverter reports Bypass. Thanks to @sphings79.
 - **LilyGo/ESPHome: Backup Function releases the battery** (#534): reads AC Offgrid Power (32302); the docs give the YAML block to add. Thanks to @Reinvented0.
 - **A manual forced charge/discharge survives a Modbus stall** (#477). Thanks to @Remueb.
 - **A Marstek that accepts the connection but answers nothing no longer defeats the back-off** (#445). Thanks to @TheGoodHubs.

@@ -209,6 +209,7 @@ from .const import (
     DEFAULT_HOURLY_BALANCE_MAX_OFFSET_W,
     NORMAL_BALANCE_PAUSE_CELL_VOLTAGE,
     NORMAL_BALANCE_RECAL_INVERTER_STANDBY,
+    INVERTER_STATE_AC_BYPASS,
     NORMAL_BALANCE_RECAL_RETRY_CELL_VOLTAGE,
     BMS_DISCHARGE_CUTOFF_SOC,
     PD_READBACK_EVERY_N_WRITES,
@@ -616,6 +617,17 @@ def _backup_switch_enabled(value) -> bool:
     if isinstance(value, str):
         return value in ("Off-grid", "Ready")
     return value == 0
+
+
+def _inverter_in_ac_bypass(value) -> bool:
+    """Whether the reported inverter state is the grid-bypass state.
+
+    Register drivers and the ESPHome driver publish the raw code (6 = Bypass).
+    Other drivers publish labels or their own codes, which never match.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == INVERTER_STATE_AC_BYPASS
 
 
 def _delivered_toward(data: dict, cell_power: float, *, is_charge: bool) -> float:
@@ -4467,6 +4479,21 @@ class ChargeDischargeController:
 
         # Switch is ON. Check whether the battery is actively providing offgrid power.
         ac_offgrid = coordinator.data.get("ac_offgrid_power")
+
+        # In Bypass the grid is passed through to the backup port, so a load
+        # connected there reads as off-grid power although the battery supplies
+        # nothing. Only a real outage (backup state) means the battery is
+        # feeding the port, so treat the port as idle here and let the normal
+        # post-backup cooldown run out. The two values are read in separate
+        # register groups, and a failed read leaves the old value in place, so a
+        # stale Bypass must not hide a fresh port load: only trust it when both
+        # came from the same poll.
+        if _inverter_in_ac_bypass(
+            coordinator.data.get("inverter_state")
+        ) and coordinator.readings_from_same_poll(
+            "inverter_state", "ac_offgrid_power"
+        ):
+            ac_offgrid = 0
 
         # Small permanent loads (e.g. a PoE switch, router, or AP connected to the
         # offgrid port) should not trigger backup exclusion. Only a substantial load
