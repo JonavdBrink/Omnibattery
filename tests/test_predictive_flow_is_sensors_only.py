@@ -14,6 +14,7 @@ import pytest
 from custom_components.omnibattery.config_flow import (
     MarstekVenusConfigFlow,
     OptionsFlowHandler,
+    _preserve_values_in_error_forms,
 )
 
 
@@ -169,3 +170,27 @@ async def test_realtime_price_validation_preserves_submitted_values(options):
     assert fields["solar_forecast_sensor"].description == {
         "suggested_value": "sensor.forecast"
     }
+
+
+async def test_preserving_values_never_evaluates_step_annotations():
+    """Python 3.14 evaluates annotations lazily; HA's inherited steps use
+    TYPE_CHECKING-only names (BluetoothServiceInfoBleak) and must not crash
+    the import of config_flow."""
+
+    def _unresolvable(_format):
+        raise NameError("name 'BluetoothServiceInfoBleak' is not defined")
+
+    class Base:
+        async def async_step_bluetooth(self, discovery_info):
+            return discovery_info
+
+        async_step_bluetooth.__annotate__ = _unresolvable
+
+    @_preserve_values_in_error_forms
+    class Flow(Base):
+        async def async_step_user(self, user_input=None):
+            return user_input
+
+    assert await Flow().async_step_user({"a": 1}) == {"a": 1}
+    assert await Flow().async_step_user(user_input={"a": 2}) == {"a": 2}
+    assert await Flow().async_step_user() is None

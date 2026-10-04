@@ -1299,19 +1299,25 @@ def _restore_submitted_values(data_schema: vol.Schema, user_input: dict[str, Any
 def _preserve_values_in_error_forms(flow_class):
     """Wrap flow steps so validation errors do not discard their submitted values."""
     for name, method in inspect.getmembers(flow_class, inspect.iscoroutinefunction):
+        # Read parameter names from the code object, not inspect.signature():
+        # on Python 3.14 that evaluates annotations, and inherited HA steps
+        # annotate with TYPE_CHECKING-only names (BluetoothServiceInfoBleak).
+        code = method.__code__
+        params = code.co_varnames[: code.co_argcount]
         if (
             not name.startswith("async_step_")
-            or "user_input" not in inspect.signature(method).parameters
+            or "user_input" not in params
             or getattr(method, "_preserves_submitted_values", False)
         ):
             continue
 
-        signature = inspect.signature(method)
+        # Position of user_input among the args passed after self.
+        position = params.index("user_input") - 1
 
         @functools.wraps(method)
-        async def wrapped(self, *args, __method=method, __signature=signature, **kwargs):
-            submitted = __signature.bind_partial(self, *args, **kwargs).arguments.get(
-                "user_input"
+        async def wrapped(self, *args, __method=method, __position=position, **kwargs):
+            submitted = kwargs.get(
+                "user_input", args[__position] if len(args) > __position else None
             )
             result = await __method(self, *args, **kwargs)
             if (
