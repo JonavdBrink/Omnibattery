@@ -468,6 +468,9 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Timestamp-based update tracking
         self._last_update_times = {}
+        # Per key, not per group: a group is stamped when any one of its keys is
+        # stored, so it cannot tell which values a partial read refreshed.
+        self._key_update_times = {}
         self._critical_group_failures = {}
         self._refresh_count = 0
         self._refresh_times: deque[float] = deque(maxlen=256)
@@ -841,22 +844,15 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
     def readings_from_same_poll(self, key_a: str, key_b: str) -> bool:
         """Whether two keys were last stored by the same poll cycle.
 
-        Read groups are polled and merged into ``data`` independently: a group
-        whose read fails keeps its previous value in ``data``. Every group read
-        in one cycle shares the cycle's timestamp, so equal timestamps mean both
-        values came from the same poll. Anything else, including a key that has
-        never been read, is not a match.
+        A key whose read fails keeps its previous value in ``data``. Every key
+        stored in one cycle shares the cycle's timestamp, so equal timestamps
+        mean both values came from the same poll. Tracked per key because a
+        group can be read partially: the ESPHome driver puts every key in one
+        group and omits the unavailable ones. A key never read is not a match.
         """
-        times = []
-        for key in (key_a, key_b):
-            stamp = next(
-                (ts for keys, ts in self._last_update_times.items() if key in keys),
-                None,
-            )
-            if stamp is None:
-                return False
-            times.append(stamp)
-        return times[0] == times[1]
+        times = getattr(self, "_key_update_times", {})
+        stamp_a, stamp_b = times.get(key_a), times.get(key_b)
+        return stamp_a is not None and stamp_a == stamp_b
 
     @property
     def is_available(self) -> bool:
@@ -1506,6 +1502,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                         continue
 
                 updated_data[key] = value
+                self._key_update_times[key] = now
                 stored += 1
                 if DEBUG_POLL_SENSOR_VALUES and group.scan_interval == "high":
                     _LOGGER.debug("[%s] Updated %s: %s", self.name, key, value)

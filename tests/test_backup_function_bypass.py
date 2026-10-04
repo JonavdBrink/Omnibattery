@@ -105,40 +105,110 @@ def test_switch_off_is_never_backup(inverter_state):
     assert _active(coord) is False
 
 
-def _real_coordinator(last_update_times):
+def _real_coordinator(key_update_times):
     from custom_components.omnibattery.infra.coordinator import (
         MarstekVenusDataUpdateCoordinator,
     )
 
-    coord = SimpleNamespace(_last_update_times=last_update_times)
+    coord = SimpleNamespace(_key_update_times=key_update_times)
     return lambda a, b: MarstekVenusDataUpdateCoordinator.readings_from_same_poll(
         coord, a, b
     )
 
 
-def test_same_poll_matches_equal_group_timestamps():
+def test_same_poll_matches_equal_key_timestamps():
     now = dt_util.utcnow()
-    check = _real_coordinator({("ac_offgrid_power",): now, ("inverter_state",): now})
+    check = _real_coordinator({"ac_offgrid_power": now, "inverter_state": now})
     assert check("inverter_state", "ac_offgrid_power") is True
 
 
-def test_same_poll_rejects_a_group_that_missed_a_cycle():
+def test_same_poll_rejects_a_key_that_missed_a_cycle():
     now = dt_util.utcnow()
     check = _real_coordinator(
         {
-            ("ac_offgrid_power",): now,
-            ("inverter_state",): now - timedelta(seconds=5),
+            "ac_offgrid_power": now,
+            "inverter_state": now - timedelta(seconds=5),
         }
     )
     assert check("inverter_state", "ac_offgrid_power") is False
 
 
-def test_same_poll_matches_keys_in_one_group():
-    now = dt_util.utcnow()
-    check = _real_coordinator({("inverter_state", "ac_offgrid_power"): now})
-    assert check("inverter_state", "ac_offgrid_power") is True
-
-
 def test_same_poll_rejects_a_key_that_was_never_read():
-    check = _real_coordinator({("ac_offgrid_power",): dt_util.utcnow()})
+    check = _real_coordinator({"ac_offgrid_power": dt_util.utcnow()})
     assert check("inverter_state", "ac_offgrid_power") is False
+
+
+async def test_partial_read_of_a_shared_group_does_not_trust_stale_bypass(
+    monkeypatch,
+):
+    """ESPHome reads every key in one group and omits unavailable entities.
+
+    The group is stamped as soon as one key is stored, so a per-group check
+    would pair a fresh port load with the previous poll's Bypass.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from homeassistant.util import dt as ha_dt
+
+    from custom_components.omnibattery.drivers.base import ReadGroup
+    from custom_components.omnibattery.infra.coordinator import (
+        MarstekVenusDataUpdateCoordinator,
+    )
+
+    replies = iter(
+        [
+            {"inverter_state": INVERTER_BYPASS, "ac_offgrid_power": 116},
+            {"ac_offgrid_power": 900},  # inverter_state entity unavailable
+        ]
+    )
+
+    async def read_telemetry(keys):
+        return next(replies)
+
+    clock = iter([dt_util.utcnow(), dt_util.utcnow() + timedelta(seconds=2)])
+    monkeypatch.setattr(ha_dt, "utcnow", lambda: next(clock))
+
+    keys = ("inverter_state", "ac_offgrid_power")
+    coord = SimpleNamespace(
+        name="Venus",
+        host="192.0.2.10",
+        device_key="192.0.2.10_1",
+        driver=SimpleNamespace(
+            read_groups=[ReadGroup("high", keys)],
+            read_telemetry=read_telemetry,
+            control_dependency_keys=set(),
+        ),
+        _def_by_key={k: {"key": k} for k in keys},
+        _get_entity_type=lambda definition, fallback_key=None: "sensor",
+        _entity_registry=SimpleNamespace(
+            async_get_entity_id=lambda *args: None, entities={}
+        ),
+        _is_shutting_down=False,
+        _suspension_reset_time=None,
+        _last_update_times={},
+        _key_update_times={},
+        _critical_group_failures={},
+        boost_fast_poll_until=0.0,
+        lock=asyncio.Lock(),
+        _consecutive_failures=0,
+        _max_failures_before_reconnect=99,
+        _max_failures_before_suspend=100,
+        _is_connected=True,
+        data={},
+        async_reconnect_fresh=AsyncMock(return_value=True),
+        capabilities=SimpleNamespace(
+            has_energy_counters=True, has_daily_energy_counters=True
+        ),
+        battery_capacity_kwh=0,
+        _alarm_notifier=SimpleNamespace(check=AsyncMock()),
+    )
+
+    for _ in range(2):
+        coord._last_update_times.clear()
+        await MarstekVenusDataUpdateCoordinator._async_update_data(coord)
+
+    assert coord.data["inverter_state"] == INVERTER_BYPASS  # stale, kept
+    assert MarstekVenusDataUpdateCoordinator.readings_from_same_poll(
+        coord, "inverter_state", "ac_offgrid_power"
+    ) is False
