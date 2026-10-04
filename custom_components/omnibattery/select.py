@@ -12,12 +12,20 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     CONF_BATTERY_PHASE,
+    CONF_CHARGE_PRIORITY,
+    CONF_PRIMARY_BATTERY,
     CONF_THREE_PHASE_ENABLED,
+    DEFAULT_CHARGE_PRIORITY,
+    DEFAULT_PRIMARY_BATTERY,
     CONF_WEEKLY_FULL_CHARGE_DAY,
     DEFAULT_THREE_PHASE_ENABLED,
     PHASE_ASSIGNMENT_VALUES,
     PHASE_UNASSIGNED,
     CONF_PD_TUNING_PROFILE,
+    CONF_HIGH_PRICE_DISCHARGE_ENABLED,
+    CONF_HIGH_PRICE_SURPLUS_EXPORT_ENABLED,
+    CONF_PREDICTIVE_CHARGING_MODE,
+    PREDICTIVE_MODE_DYNAMIC_PRICING,
     PD_PROFILE_CUSTOM,
     PD_TUNING_PROFILES,
     PD_TUNING_PROFILE_OPTIONS,
@@ -61,6 +69,22 @@ async def async_setup_entry(
 
     # Add PD tuning profile select (system-level, always available)
     entities.append(PdTuningProfileSelect(hass, entry))
+
+    # Which battery leads, on either side. Only meaningful with more than one,
+    # and the battery count is structural: changing it reloads the entry.
+    if len(entry.data.get("batteries", [])) > 1:
+        entities.append(PrimaryBatterySelect(hass, entry))
+        entities.append(ChargePrioritySelect(hass, entry))
+
+    # High-price sale (#270): one ladder over both triggers. Dynamic pricing
+    # only, like the other price-aware export toggles (see switch.py).
+    controller = hass.data[DOMAIN][entry.entry_id].get("controller")
+    if (
+        controller
+        and entry.data.get(CONF_PREDICTIVE_CHARGING_MODE) == PREDICTIVE_MODE_DYNAMIC_PRICING
+        and CONF_HIGH_PRICE_DISCHARGE_ENABLED in entry.data
+    ):
+        entities.append(HighPriceSaleSelect(hass, entry, controller))
 
     async_add_entities(entities)
 
@@ -180,6 +204,11 @@ class MarstekVenusSelect(CoordinatorEntity, SelectEntity):
         assert_manual_control(self.hass, self.coordinator, self.definition["key"])
         value = self._options_map[option]
         await self.coordinator.write_control(self.definition["key"], value, do_refresh=True)
+        if self.definition["key"] == "force_mode":
+            # Remember the intent: some v3 firmwares drop forced mode during a
+            # Modbus stall and the manual loop re-asserts it (issue #477).
+            self.coordinator.manual_force_mode = option
+            self.coordinator.persist_battery_config("manual_force_mode", option)
         if self.definition.get("use_shadow_state"):
             self.coordinator.set_shadow_select(self.definition["key"], value)
 
@@ -237,6 +266,123 @@ class WeeklyFullChargeDaySelect(SelectEntity):
             "name": "Omnibattery System",
             "manufacturer": "Omnibattery",
             "model": "Multi-Battery System",
+        }
+
+
+class _BatteryNameSelect(SelectEntity):
+    """Base for a system-level select whose options are the battery names.
+
+    ``automatic`` is a state rather than a battery, so it carries a translation;
+    the names do not.
+    """
+
+    _AUTOMATIC = "automatic"
+    _conf_key: str = ""
+    _default: str = ""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        """Initialize the select."""
+        self.hass = hass
+        self.entry = entry
+
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}{self._attr_translation_key}"
+        self.entity_id = system_entity_id("select", self._attr_translation_key)
+
+    @property
+    def options(self) -> list[str]:
+        """Automatic, plus every configured battery by name."""
+        names = [
+            battery.get("name", "")
+            for battery in self.entry.data.get("batteries", [])
+            if battery.get("name")
+        ]
+        return [self._AUTOMATIC, *names]
+
+    @property
+    def current_option(self) -> str:
+        """Return the nominated battery, or automatic when none is set."""
+        name = self.entry.data.get(self._conf_key, self._default)
+        return name if name in self.options else self._AUTOMATIC
+
+    @property
+    def _controller(self):
+        """The running controller, or None before setup has finished."""
+        return self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("controller")
+
+    async def async_select_option(self, option: str) -> None:
+        """Persist the choice and hand it to the running controller."""
+        name = "" if option == self._AUTOMATIC else option
+        new_data = dict(self.entry.data)
+        new_data[self._conf_key] = name
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
+        # The controller reads this every cycle; setting it here means the choice
+        # takes effect now rather than at the next reload. The config key doubles
+        # as the controller attribute name for both of these.
+        controller = self._controller
+        if controller is not None:
+            setattr(controller, self._conf_key, name)
+        _LOGGER.info("%s set to %s", self._conf_key, name or "automatic")
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self):
+        """Return device information for the system."""
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }
+
+
+class PrimaryBatterySelect(_BatteryNameSelect):
+    """Which battery serves the house first.
+
+    Discharge normally goes to the fullest battery. Nominating a primary puts
+    that one ahead of the ladder, and it is the battery the feedforward
+    addresses when that switch is on.
+    """
+
+    _conf_key = CONF_PRIMARY_BATTERY
+    _default = DEFAULT_PRIMARY_BATTERY
+    _attr_translation_key = "primary_battery"
+    _attr_icon = "mdi:numeric-1-box-outline"
+    _attr_should_poll = False
+
+
+class ChargePrioritySelect(_BatteryNameSelect):
+    """Which battery is filled first.
+
+    Left automatic, the order follows the day: with sun enough for everything the
+    battery needing the most hours goes first, and on a thin day the one that
+    loses the least to conversion.
+    """
+
+    _conf_key = CONF_CHARGE_PRIORITY
+    _default = DEFAULT_CHARGE_PRIORITY
+    _attr_translation_key = "charge_priority"
+    _attr_icon = "mdi:battery-arrow-up"
+    # The order and the hours-to-full it reports are recomputed every cycle;
+    # unpolled they would freeze at the moment the selection last changed.
+    _attr_should_poll = True
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Show the order in force and what decided it."""
+        from .control.charge_order import charge_order, scarce_solar_day, time_to_full_h
+
+        controller = self._controller
+        if controller is None:
+            return {}
+        batteries = list(getattr(controller, "coordinators", []))
+        return {
+            "order": [c.name for c in charge_order(controller, batteries)],
+            "hours_to_full": {
+                c.name: round(time_to_full_h(controller, c), 1) for c in batteries
+            },
+            "thin_solar_day": scarce_solar_day(controller),
         }
 
 
@@ -377,3 +523,71 @@ class MarstekManualForceModeSelect(CoordinatorEntity, SelectEntity):
     def device_info(self):
         """Return device information."""
         return self.coordinator.battery_device_info
+
+
+HIGH_PRICE_SALE_OFF = "off"
+HIGH_PRICE_SALE_SURPLUS = "surplus"
+HIGH_PRICE_SALE_SURPLUS_ARBITRAGE = "surplus_arbitrage"
+# option -> (trigger 1 surplus export, trigger 2 buy-back arbitrage)
+HIGH_PRICE_SALE_TRIGGERS = {
+    HIGH_PRICE_SALE_OFF: (False, False),
+    HIGH_PRICE_SALE_SURPLUS: (True, False),
+    HIGH_PRICE_SALE_SURPLUS_ARBITRAGE: (True, True),
+}
+
+
+class HighPriceSaleSelect(SelectEntity):
+    """Risk ladder for selling stored energy into high export prices (#270).
+
+    Trigger 1 sells only surplus that tomorrow's solar refills; trigger 2 also
+    sells energy the home needs later and buys it back. Arbitrage without the
+    surplus sale is not offered: that surplus has no better use.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
+        """Initialize the high-price sale select."""
+        self.hass = hass
+        self.entry = entry
+        self.controller = controller
+
+        self._attr_has_entity_name = True
+        self._attr_translation_key = "high_price_sale"
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}high_price_sale"
+        self.entity_id = system_entity_id("select", "high_price_sale")
+        self._attr_icon = "mdi:transmission-tower-export"
+        self._attr_options = list(HIGH_PRICE_SALE_TRIGGERS)
+        self._attr_should_poll = False
+
+    @property
+    def current_option(self) -> str:
+        """Return the option matching the controller's trigger flags."""
+        if self.controller.high_price_discharge_enabled:
+            return HIGH_PRICE_SALE_SURPLUS_ARBITRAGE
+        if self.controller.high_price_surplus_export_enabled:
+            return HIGH_PRICE_SALE_SURPLUS
+        return HIGH_PRICE_SALE_OFF
+
+    async def async_select_option(self, option: str) -> None:
+        """Store both trigger flags for the chosen option."""
+        # ponytail: no explicit override removal on the way down.
+        # refresh_override() runs every control cycle and releases on a failed
+        # scope gate, so the export stops on the next cycle.
+        surplus, arbitrage = HIGH_PRICE_SALE_TRIGGERS[option]
+        self.controller.high_price_surplus_export_enabled = surplus
+        self.controller.high_price_discharge_enabled = arbitrage
+        new_data = dict(self.entry.data)
+        new_data[CONF_HIGH_PRICE_SURPLUS_EXPORT_ENABLED] = surplus
+        new_data[CONF_HIGH_PRICE_DISCHARGE_ENABLED] = arbitrage
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+        _LOGGER.info("High-price sale set to %s", option)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self):
+        """Return device information for the system."""
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }

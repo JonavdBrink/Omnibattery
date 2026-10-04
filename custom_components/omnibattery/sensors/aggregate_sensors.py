@@ -25,6 +25,7 @@ from ..const import (
     CONF_OFFGRID_MODE_ENABLED,
     pd_profile_from_params,
 )
+from ..drivers.base import DELIVERED_AC_POWER_KEY
 from ..infra.coordinator import MarstekVenusDataUpdateCoordinator
 from ..infra.entity_naming import system_entity_id
 from ..tracking.consumption_tracker import (
@@ -437,19 +438,28 @@ class MarstekVenusAggregateSensor(RestoreEntity, SensorEntity):
         """Calculate capacity-weighted SOC across all batteries."""
         total_capacity = 0
         total_stored = 0
+        socs = []
 
         for coordinator in self.coordinators:
             if coordinator.data:
                 soc = coordinator.data.get("battery_soc")
+                if soc is None:
+                    continue
+                socs.append(soc)
                 capacity = coordinator.data.get("battery_total_energy")
-                if soc is not None and capacity is not None and capacity > 0:
+                if capacity is not None and capacity > 0:
                     total_capacity += capacity
                     total_stored += (soc / 100.0) * capacity
 
         if total_capacity <= 0:
-            return None
-
-        weighted_soc = (total_stored / total_capacity) * 100
+            # Drivers without a hardware capacity (Zendure, Sessy) leave
+            # battery_total_energy absent until the user configures it, which
+            # used to make the whole system SOC unknown. Plain mean instead.
+            if not socs:
+                return None
+            weighted_soc = sum(socs) / len(socs)
+        else:
+            weighted_soc = (total_stored / total_capacity) * 100
         has_v3 = any(
             getattr(c, "battery_version", "v2") in ("v3", "vA", "vD")
             for c in self.coordinators
@@ -459,12 +469,18 @@ class MarstekVenusAggregateSensor(RestoreEntity, SensorEntity):
 
     @staticmethod
     def _ac_convention_power(data: dict) -> float | None:
-        """Return battery power in ac_power convention (charge negative, discharge positive).
+        """Return battery power at the AC bus (charge negative, discharge positive).
 
-        Marstek exposes ``ac_power`` directly. Drivers that don't (e.g. Zendure)
-        only synthesise ``battery_power`` (+charge / −discharge, opposite sign),
-        so fall back to its negation to keep them in the system charge/discharge totals.
+        Three sources, most direct first. ``ac_delivered_power`` is the device's
+        own AC port, published in ``battery_power`` convention by the drivers that
+        can measure it. ``ac_power`` is the register Marstek exposes. Last is
+        ``battery_power`` negated, which is *cell* power: on a battery with PV on
+        its own DC bus it reads "charging" from the sun with nothing crossing the
+        AC port, so using it here bills the array to the house (issue #453).
         """
+        delivered = data.get(DELIVERED_AC_POWER_KEY)
+        if delivered is not None:
+            return -delivered
         power = data.get("ac_power")
         if power is not None:
             return power

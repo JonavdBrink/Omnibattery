@@ -59,6 +59,26 @@ def test_recovery_between_grace_and_second_attempt_clears_state():
     assert tracker.record_non_delivery(coord, 300, 0) == "wake"  # fresh grace budget
 
 
+def test_last_reason_distinguishes_charge_from_discharge():
+    """Callers that only want to act on a charge-side condition (e.g. a BMS
+    full-charge exemption) key off this prefix -- it must not blur charge and
+    discharge episodes together."""
+    tracker = NonResponsiveTracker(fail_threshold=3)
+    coord = _coord()
+
+    assert tracker.last_reason(coord) == ""
+    assert tracker.last_reason(coord, "default") == "default"
+
+    tracker.record_non_delivery(coord, 1250, 5, reason="charge_non_delivery")
+    assert tracker.last_reason(coord).startswith("charge_")
+
+    tracker.record_non_delivery(coord, 600, 0, reason="standby_no_delivery")
+    assert not tracker.last_reason(coord).startswith("charge_")
+
+    tracker.record_comm_failure(coord, "modbus_write_failed")
+    assert not tracker.last_reason(coord).startswith("charge_")
+
+
 def test_cooldown_is_flat_across_episodes():
     """The exclusion cooldown must not grow across episodes — recovering fast is
     the goal, so a second exclusion waits the same as the first (no backoff)."""

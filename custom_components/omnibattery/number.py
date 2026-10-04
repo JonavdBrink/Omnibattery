@@ -36,11 +36,10 @@ from .const import (
     PRICE_INTEGRATION_CKW,
     CONF_NEGATIVE_INJECTION_THRESHOLD,
     CONF_PREDISCHARGE_RESERVE_SOC,
-    CONF_PREDISCHARGE_MAX_EXPORT_POWER_W,
-    CONF_PREDISCHARGE_EXPORT_MODE,
-    PREDISCHARGE_EXPORT_MODE_SELF_CONSUMPTION,
-    PREDISCHARGE_EXPORT_MODE_CUSTOM,
-    normalize_predischarge_export_settings,
+    DEFAULT_NEGATIVE_INJECTION_THRESHOLD,
+    DEFAULT_PREDISCHARGE_RESERVE_SOC,
+    CONF_SURPLUS_PRICE_HOLD_ENABLED,
+    CONF_DISCHARGE_RESERVE_ENABLED,
     MIN_CHARGE_HYSTERESIS_PERCENT,
     MAX_CHARGE_HYSTERESIS_PERCENT,
     DOMAIN,
@@ -98,8 +97,8 @@ async def async_setup_entry(
         # already enforces these in software; previously they were only changeable
         # through the options flow.
         if not coordinator.capabilities.hardware_soc_cutoff:
-            entities.append(MarstekSoftSocLimitNumber(coordinator, "max"))
-            entities.append(MarstekSoftSocLimitNumber(coordinator, "min"))
+            entities.append(SoftSocLimitNumber(coordinator, "max"))
+            entities.append(SoftSocLimitNumber(coordinator, "min"))
 
         if coordinator.enable_charge_hysteresis:
             entities.append(MarstekChargeHysteresisNumber(coordinator))
@@ -125,6 +124,15 @@ async def async_setup_entry(
     # hides disabled features' sliders, and toggling a feature switch doesn't
     # reload platforms, so the entities must exist either way. System power
     # limits predate their enable key, so presence is not required for them.
+    # Features whose keys are backfilled on every entry but which only run under
+    # dynamic pricing; their sliders would otherwise render on time-slot installs.
+    dynamic_pricing_only = {
+        CONF_SURPLUS_PRICE_HOLD_ENABLED,
+        CONF_DISCHARGE_RESERVE_ENABLED,
+    }
+    is_dynamic_pricing = (
+        entry.data.get(CONF_PREDICTIVE_CHARGING_MODE) == PREDICTIVE_MODE_DYNAMIC_PRICING
+    )
     for definition in CONFIG_NUMBER_DEFINITIONS:
         condition = definition.get("condition")
         if (
@@ -132,6 +140,8 @@ async def async_setup_entry(
             and condition not in entry.data
             and condition != CONF_ENABLE_SYSTEM_POWER_LIMITS
         ):
+            continue
+        if condition in dynamic_pricing_only and not is_dynamic_pricing:
             continue
         entities.append(MarstekConfigNumberEntity(hass, entry, definition))
 
@@ -148,7 +158,6 @@ async def async_setup_entry(
         entities.append(MarstekArbitrageNumber(hass, entry, "efficiency"))
         entities.append(SmartPredischargeNumber(hass, entry, "threshold"))
         entities.append(SmartPredischargeNumber(hass, entry, "reserve"))
-        entities.append(SmartPredischargeNumber(hass, entry, "export"))
 
     # Temperature charge limit sliders (system-level, when the feature is configured)
     if CONF_ENABLE_TEMP_CHARGE_LIMIT in entry.data:
@@ -286,7 +295,11 @@ class MarstekVenusNumber(CoordinatorEntity, NumberEntity):
 
         # Write the converted value via the logical control key
         await self.coordinator.write_control(key, register_value, do_refresh=True)
-        
+        if key in ("set_charge_power", "set_discharge_power"):
+            # Manual intent for the #477 re-assert (see select force_mode).
+            setattr(self.coordinator, f"manual_{key}", int(value))
+            self.coordinator.persist_battery_config(f"manual_{key}", int(value))
+
         # Update coordinator attributes immediately for control loop
         # This ensures changes take effect immediately without waiting for scan_interval
         if self.definition['key'] == 'charging_cutoff_capacity':
@@ -469,8 +482,11 @@ class MarstekConfigNumberEntity(NumberEntity):
 
     @property
     def native_value(self):
-        """Return the current value from config_entry.data, converted to display units."""
-        raw = self.entry.data.get(self._key, self._definition["default"])
+        """Return the current value from config_entry.data, in display units."""
+        default = self._definition["default"]
+        if callable(default):
+            default = default(self.entry.data)
+        raw = self.entry.data.get(self._key, default)
         return raw / self._scale
 
     async def async_set_native_value(self, value: float) -> None:
@@ -667,6 +683,7 @@ class SmartPredischargeNumber(NumberEntity):
             2.0,
             0.001,
             "mdi:cash-minus",
+            DEFAULT_NEGATIVE_INJECTION_THRESHOLD,
         ),
         "reserve": (
             CONF_PREDISCHARGE_RESERVE_SOC,
@@ -674,13 +691,7 @@ class SmartPredischargeNumber(NumberEntity):
             100.0,
             1.0,
             "mdi:battery-lock",
-        ),
-        "export": (
-            CONF_PREDISCHARGE_MAX_EXPORT_POWER_W,
-            0.0,
-            10000.0,
-            50.0,
-            "mdi:transmission-tower-export",
+            DEFAULT_PREDISCHARGE_RESERVE_SOC,
         ),
     }
 
@@ -688,8 +699,9 @@ class SmartPredischargeNumber(NumberEntity):
         self.hass = hass
         self.entry = entry
         self._kind = kind
-        key, minimum, maximum, step, icon = self._DEFINITIONS[kind]
+        key, minimum, maximum, step, icon, default = self._DEFINITIONS[kind]
         self._conf_key = key
+        self._default = default
         self._attr_translation_key = key
         self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}{key}"
         self.entity_id = system_entity_id("number", key)
@@ -700,10 +712,8 @@ class SmartPredischargeNumber(NumberEntity):
         if kind == "threshold":
             is_chf = entry.data.get(CONF_PRICE_INTEGRATION_TYPE) == PRICE_INTEGRATION_CKW
             self._attr_native_unit_of_measurement = "CHF/kWh" if is_chf else "€/kWh"
-        elif kind == "reserve":
-            self._attr_native_unit_of_measurement = "%"
         else:
-            self._attr_native_unit_of_measurement = "W"
+            self._attr_native_unit_of_measurement = "%"
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(self.entry.add_update_listener(self._handle_entry_update))
@@ -713,31 +723,18 @@ class SmartPredischargeNumber(NumberEntity):
 
     @property
     def native_value(self) -> float:
-        _mode, export_power = normalize_predischarge_export_settings(
-            self.entry.data.get(CONF_PREDISCHARGE_EXPORT_MODE),
-            self.entry.data.get(self._conf_key, 0.0),
-        )
-        return export_power
+        return self.entry.data.get(self._conf_key, self._default)
 
     async def async_set_native_value(self, value: float) -> None:
         new_data = dict(self.entry.data)
-        _mode, export_power = normalize_predischarge_export_settings(
-            None,
-            value,
-        )
-        new_data[self._conf_key] = export_power
-        new_data[CONF_PREDISCHARGE_EXPORT_MODE] = (
-            PREDISCHARGE_EXPORT_MODE_CUSTOM
-            if export_power > 0
-            else PREDISCHARGE_EXPORT_MODE_SELF_CONSUMPTION
-        )
+        new_data[self._conf_key] = value
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
         controller = self.hass.data[DOMAIN][self.entry.entry_id].get("controller")
         if controller is not None:
             controller.update_pd_parameters()
-            # Never keep applying a plan calculated with the previous threshold,
-            # forecast margin or export cap.  The existing reevaluate button (or
-            # the next scheduled evaluation) rebuilds it.
+            # Never keep applying a plan calculated with the previous
+            # threshold or reserve.  The existing reevaluate button (or the
+            # next scheduled evaluation) rebuilds it.
             controller._pricing_mgr.clear_curtailment_runtime(
                 "configuration_changed"
             )
@@ -902,12 +899,16 @@ class ExcludedDeviceExclusionPctNumber(NumberEntity):
         }
 
 
-class MarstekSoftSocLimitNumber(CoordinatorEntity, NumberEntity):
-    """Software-enforced SOC limit for batteries that don't expose hardware cutoff registers (v3/vA/vD).
+class SoftSocLimitNumber(CoordinatorEntity, NumberEntity):
+    """Software-enforced SOC limit for batteries that don't expose hardware cutoff registers.
 
     Mirrors the UX of the v2 charging/discharging_cutoff_capacity number entities,
     but writes only to coordinator state and config_entry.data — no Modbus write.
     The PD controller reads coordinator.max_soc / coordinator.min_soc each cycle.
+
+    The bounds come from the driver, not from constants here. They started as
+    the Venus D's hardware floors and every brand inherited them, which put a
+    12 % floor on a LUNA2000 whose own minimum is 5 % (#495).
     """
 
     def __init__(self, coordinator: MarstekVenusDataUpdateCoordinator, kind: str) -> None:
@@ -918,18 +919,19 @@ class MarstekSoftSocLimitNumber(CoordinatorEntity, NumberEntity):
         self._attr_native_unit_of_measurement = "%"
         self._attr_native_step = 1
         self._attr_should_poll = False
+        capabilities = coordinator.capabilities
         if kind == "max":
             self._attr_translation_key = "charging_cutoff_capacity"
             self._attr_unique_id = f"{coordinator.device_key}_charging_cutoff_capacity"
             self._attr_icon = "mdi:battery-arrow-up"
-            self._attr_native_min_value = 50
-            self._attr_native_max_value = 100
+            low, high = capabilities.charge_cutoff_range
         else:
             self._attr_translation_key = "discharging_cutoff_capacity"
             self._attr_unique_id = f"{coordinator.device_key}_discharging_cutoff_capacity"
             self._attr_icon = "mdi:battery-arrow-down"
-            self._attr_native_min_value = 12
-            self._attr_native_max_value = 50
+            low, high = capabilities.discharge_cutoff_range
+        self._attr_native_min_value = float(low)
+        self._attr_native_max_value = float(high)
         self.entity_id = english_entity_id("number", coordinator.name, self._attr_translation_key)
 
     @property
@@ -1123,13 +1125,23 @@ class MarstekSoftMaxChargeNumber(CoordinatorEntity, NumberEntity):
         self._attr_icon = "mdi:battery-arrow-up-outline"
         self._attr_native_unit_of_measurement = "W"
         self._attr_native_min_value = 0
-        self._attr_native_max_value = getattr(
-            coordinator,
-            "device_max_charge_power",
-            coordinator.capabilities.max_charge_power_w,
-        )
         self._attr_native_step = 10
         self._attr_should_poll = False
+
+    @property
+    def native_max_value(self) -> float:
+        """Follow the ceiling the device currently reports.
+
+        A property, not a frozen attribute: the device cap moves when the user
+        raises the limit in the vendor app, and the poll adopts it
+        (``_sync_device_reported_limits``). Freezing it in __init__ meant the
+        slider only caught up on a reload (issue #449).
+        """
+        return float(getattr(
+            self.coordinator,
+            "device_max_charge_power",
+            self.coordinator.capabilities.max_charge_power_w,
+        ))
 
     @property
     def native_value(self) -> float:
@@ -1176,13 +1188,23 @@ class MarstekSoftMaxDischargeNumber(CoordinatorEntity, NumberEntity):
         self._attr_icon = "mdi:battery-arrow-down-outline"
         self._attr_native_unit_of_measurement = "W"
         self._attr_native_min_value = 0
-        self._attr_native_max_value = getattr(
-            coordinator,
-            "device_max_discharge_power",
-            coordinator.capabilities.max_discharge_power_w,
-        )
         self._attr_native_step = 10
         self._attr_should_poll = False
+
+    @property
+    def native_max_value(self) -> float:
+        """Follow the ceiling the device currently reports.
+
+        A property, not a frozen attribute: the device cap moves when the user
+        raises the limit in the vendor app, and the poll adopts it
+        (``_sync_device_reported_limits``). Freezing it in __init__ meant the
+        slider only caught up on a reload (issue #449).
+        """
+        return float(getattr(
+            self.coordinator,
+            "device_max_discharge_power",
+            self.coordinator.capabilities.max_discharge_power_w,
+        ))
 
     @property
     def native_value(self) -> float:

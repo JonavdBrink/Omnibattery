@@ -33,14 +33,25 @@ def test_disabled_charge_delay_suppresses_stale_clock_markers():
     assert "const delay = delayEnabled && !weeklyDelayBypassed" in panel
 
 
-def test_disabled_hourly_balance_suppresses_feature_legend_and_markers():
+def test_hourly_balance_history_survives_the_feature_being_switched_off():
+    """The per-cell context bit is the evidence, not the live switch.
+
+    Turning hourly balance off (or a restart with it off) used to erase the
+    cause row and the orange marker from every past cell that was recorded
+    while the feature was running.
+    """
     panel = PANEL.read_text(encoding="utf-8")
 
     assert "daily-op-legend-hourly-balance" in panel
     assert 'const hourlyBalanceState = this._stateFor(this._index().byKey, "hourly_balance");' in panel
     assert "hourlyBalanceEnabled: Boolean(hourlyBalanceState" in panel
     assert "ref.hourlyBalanceLegend.hidden = !snapshot.hourlyBalanceEnabled;" in panel
-    assert "hourlyBalance: snapshot.hourlyBalanceEnabled" in panel
+    assert (
+        "hourlyBalance: ((context || 0) & DAILY_OPERATION_CONTEXT_HOURLY_BALANCE) !== 0,"
+        in panel
+    )
+    # The legend must follow the evidence, otherwise the marker has no key.
+    assert "|| actualContext.some((value) =>" in panel
 
 
 def test_open_cell_is_completed_from_the_previous_quarter_never_dropped():
@@ -100,7 +111,13 @@ def test_solar_phase_skips_an_open_cell_without_a_minute_of_coverage():
 def test_no_sun_left_reasons_are_silenced_outside_the_producing_window():
     panel = PANEL.read_text(encoding="utf-8")
 
-    assert 'if (reason === "zero_budget") return phase === "during";' in panel
+    assert (
+        'if (reason === "zero_budget") return phase === "during" && this._isDaytime();'
+        in panel
+    )
+    # The phase needs an hour of zero production to settle, so without the sun
+    # check the empty-budget notice stayed on screen after sunset.
+    assert "_isDaytime()" in panel
     assert (
         'if (reason === "learned_shape_no_future_energy") return phase !== "after";'
         in panel
@@ -110,3 +127,15 @@ def test_no_sun_left_reasons_are_silenced_outside_the_producing_window():
     # The old unconditional filter hid a zero budget even at midday, which is
     # exactly when it is worth showing.
     assert 'part.toLowerCase() !== "zero_budget"' not in panel
+
+
+def test_the_empty_solar_budget_reason_has_its_own_label():
+    panel = PANEL.read_text(encoding="utf-8")
+
+    # Without a key the notice rendered as the generic "the fallback estimate
+    # is unavailable", which says nothing about the empty forecast.
+    assert '  zero_budget: "zeroBudget",' in panel
+    dictionaries = panel.split("const DAILY_OPERATION_REASON_I18N = {", 1)[1]
+    for language in ("en", "es", "ca", "de", "fr", "nl"):
+        block = dictionaries.split(f"  {language}: {{", 1)[1].split("  },", 1)[0]
+        assert "zeroBudget:" in block, language

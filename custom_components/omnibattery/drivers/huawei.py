@@ -95,6 +95,40 @@ _REG_CHARGE_CUTOFF = 47081             # u16, tenths of a percent
 _REG_DISCHARGE_CUTOFF = 47082          # u16, tenths of a percent
 _TARGET_MODE_TIME = 0
 
+# A string carries voltage when there is light on it and collapses in the dark,
+# which makes it a reliable daylight signal needing no forecast, sun elevation or
+# clock. Measured on the reference installation: 374 V under sun, 0 V at night.
+_PV_LIT_VOLTAGE_V = 100.0
+
+# Voltage alone cannot tell a bright morning from a dim one, so it is paired
+# with harvested power (32064). Measured across three dawns on the reference
+# installation, the array sits below this for 45-50 minutes after first light
+# while the strings already stand near 300 V — time the battery is needlessly
+# refused. Set low deliberately: too high curtails a roof that is genuinely
+# producing, too low only costs availability.
+#
+# Both this and the voltage threshold above come from a single installation —
+# one ~374 V array on a SUN2000-8K. A smaller string can genuinely produce
+# below 100 V, so if a second installation disagrees, these numbers are where
+# to look first rather than the logic around them.
+_PV_HARVEST_THRESHOLD_W = 150.0
+# A band either side of it, because the dawn ramp crawls across the threshold
+# rather than stepping over it. Measured 2 September on a cloudless morning:
+# twenty minutes wobbling between 123 W and 214 W around the 150 W mark, with
+# irradiance rising smoothly throughout — so the wobble is the array, not the
+# weather. A bare comparison would flip the gate on every one of those, and
+# each flip costs a write the inverter answers by derating.
+_PV_HARVEST_HYSTERESIS_W = 50.0
+# How often a held verdict is re-checked by letting go for a moment. The cost
+# is a slice of command time each interval; the alternative is missing sunrise.
+_PV_PROBE_INTERVAL_S = 120.0
+# How long a release must stand before the reading means anything. The tracker
+# recovered in 6 s when measured (288 W to 5054 W); this leaves margin.
+_PV_PROBE_SETTLE_S = 15.0
+# When to give up on a probe whose release never reached the hardware. Longer
+# than the settle plus _MIN_WRITE_INTERVAL_S, which throttles the release write.
+_PV_PROBE_WINDOW_S = 45.0
+
 # Slave ids worth trying when scanning. 1 is the factory default for a direct
 # connection; the rest are what dongles and energy managers hand out. Kept short
 # because each one costs a connection, and the inverter needs 1.5 s of silence
@@ -296,6 +330,47 @@ _BLOCKS = (
 
 _DECODERS = {"u16": decode_u16, "i16": decode_i16, "u32": decode_u32, "i32": decode_i32}
 
+# What the inverter answers with when it cannot supply a register right now —
+# a battery asleep at its cutoff, a module still starting, an unpopulated slot.
+# The read succeeds, so the block-level guard above does not see it; only the
+# value itself gives it away. Measured in the wild: SOC 0xFFFF scaled by 0.1
+# reached the control layer as 6553.5 %, which put the battery above every
+# floor and cutoff and left the rest of the fleet idle for two hours (#494).
+#
+# Keyed by decoder, and compared against the *decoded* value: decode_i16 and
+# decode_i32 leave these below their sign boundary, so they arrive positive.
+_INVALID_RAW = {
+    "u16": 0xFFFF,
+    "i16": 0x7FFF,
+    "u32": 0xFFFFFFFF,
+    "i32": 0x7FFFFFFF,
+}
+
+# A marker is not the only way a nonsense value can arrive — a misaligned block
+# or a half-written register produces plausible-looking rubbish. These are the
+# bounds that hold for any SUN2000, checked after scaling.
+_PERCENT_KEYS = frozenset({
+    "battery_soc", "charging_cutoff_capacity", "discharging_cutoff_capacity",
+})
+# Deliberately far above any SUN2000: this catches a decode fault, it does not
+# second-guess the inverter. The largest three-phase model is two orders below.
+_POWER_SANITY_W = 1_000_000
+_POWER_KEYS = frozenset({
+    "battery_power", "solar_power", "inverter_ac_power", "grid_power",
+    "max_charge_power", "max_discharge_power",
+    "set_charge_power", "set_discharge_power",
+    "inverter_rated_power", "inverter_max_power",
+})
+
+
+def _is_out_of_range(key: str, value: float) -> bool:
+    """Whether a decoded, scaled value is outside what the hardware can mean."""
+    if key in _PERCENT_KEYS:
+        return not 0 <= value <= 100
+    if key in _POWER_KEYS:
+        return abs(value) > _POWER_SANITY_W
+    return False
+
 
 def _u32(value: int) -> list[int]:
     """Split an unsigned 32-bit value into two registers, high word first."""
@@ -411,12 +486,27 @@ class HuaweiSolarDriver(BatteryDriver):
         # pack count, so a configured limit may sit above it — and a command
         # above it is refused outright rather than clamped by the far end.
         self._register_limits: dict[str, int] = {}
+        # Keys currently being rejected as unreadable, so a battery that sleeps
+        # for hours warns once instead of every poll. Cleared per key as soon as
+        # a usable value arrives, so the next episode warns again.
+        self._rejected_keys: set[str] = set()
         # Refined from register 30071 on the first poll; two is the common case
         # and keeps the entity list sane until the inverter has answered.
         self._pv_strings = 2
         # Which pack slots are populated, learned from the packs that answer.
         # Empty until one has, so a failed read never hides a pack that exists.
         self._packs: set[int] = set()
+        # Whether the roof is producing enough to leave the inverter alone.
+        # See _update_pv_gate for why that takes two signals rather than one.
+        self._pv_lit = False
+        self._strings_lit = False
+        # Monotonic deadline of a probe in progress, 0.0 when none is.
+        self._pv_probe_until = 0.0
+        # When the verdict last came from a reading this driver could trust.
+        self._pv_verdict_monotonic = 0.0
+        # Last harvest this driver had reason to believe, in watts. None when
+        # the standing command makes the reading its own artefact.
+        self._pv_harvest_w: Optional[float] = None
         self._serial: Optional[str] = None
         # Last command actually written, so the deadband can compare against what
         # the hardware was told rather than against what it currently delivers.
@@ -447,6 +537,12 @@ class HuaweiSolarDriver(BatteryDriver):
             actuator_latency_s=_ACTUATOR_LATENCY_S,
             readback_latency_s=_ACTUATOR_LATENCY_S,
             engage_grace_s=_ACTUATOR_LATENCY_S,
+            # The windows 47081/47082 actually accept, so the cutoff controls
+            # offer what _write_cutoff will take. Offering more is not harmless:
+            # a value outside these is skipped rather than clamped, leaving the
+            # entity showing a limit the hardware never received.
+            charge_cutoff_range=_CHARGE_CUTOFF_RANGE,
+            discharge_cutoff_range=_DISCHARGE_CUTOFF_RANGE,
         )
         # One group per cadence, not per register block. The coordinator treats
         # a group that returns nothing as a failed read, and a cycle in which
@@ -477,6 +573,11 @@ class HuaweiSolarDriver(BatteryDriver):
     @property
     def capabilities(self) -> DriverCapabilities:
         return self._capabilities
+
+    @property
+    def dc_coupled(self) -> bool:
+        """The strings and the battery share one inverter; PV never leaves DC."""
+        return True
 
     @property
     def model_label(self) -> Optional[str]:
@@ -591,6 +692,25 @@ class HuaweiSolarDriver(BatteryDriver):
 
     # --- telemetry (read) ---------------------------------------------------
 
+    def _reject(self, key: str, value: float, reason: str) -> None:
+        """Drop an unusable reading, warning once per episode.
+
+        The key is left out of the snapshot rather than published as None, so
+        the coordinator treats it the way it treats a failed block — stale, and
+        retried next cycle. Publishing the value instead moves charge and
+        discharge limits; publishing None makes the entity unavailable and
+        throws away a last known value that is still the best estimate there is.
+        """
+        if key not in self._rejected_keys:
+            self._rejected_keys.add(key)
+            _LOGGER.warning(
+                "Huawei driver: dropping '%s' = %s — %s. Keeping the last known "
+                "value; further occurrences are logged at debug level.",
+                key, value, reason,
+            )
+        else:
+            _LOGGER.debug("Huawei driver: still dropping '%s' = %s — %s", key, value, reason)
+
     async def read_telemetry(self, keys: Optional[list[str]] = None) -> TelemetrySnapshot:
         requested = set(keys) if keys is not None else None
         if requested is not None:
@@ -617,14 +737,21 @@ class HuaweiSolarDriver(BatteryDriver):
                         value = decode_string(regs, offset, int(scale))
                     else:
                         raw = _DECODERS[kind](regs, offset)
+                        if raw == _INVALID_RAW.get(kind):
+                            self._reject(key, raw, "the inverter reports it as unavailable")
+                            continue
                         # Rounding here keeps binary-fraction artefacts such as
                         # 354 * 0.1 -> 35.300000000000004 out of the telemetry
                         # cache, which is compared and logged verbatim.
                         value = raw if scale == 1 else round(raw * scale, 4)
+                        if _is_out_of_range(key, value):
+                            self._reject(key, value, "outside the range the hardware can mean")
+                            continue
                 except (IndexError, ValueError, KeyError):
                     continue
                 if value is None:
                     continue
+                self._rejected_keys.discard(key)
                 snapshot[key] = value
 
         # Huawei reports each string as voltage and current; the panel and the
@@ -644,13 +771,23 @@ class HuaweiSolarDriver(BatteryDriver):
             if regs is not None:
                 # Sign matches the Omnibattery convention already: positive is
                 # import, negative export, verified against a separate meter.
-                snapshot["grid_power"] = decode_i32(regs, 0)
+                grid_power = decode_i32(regs, 0)
+                if grid_power == _INVALID_RAW["i32"]:
+                    self._reject("grid_power", grid_power, "the meter reports it as unavailable")
+                elif _is_out_of_range("grid_power", grid_power):
+                    self._reject("grid_power", grid_power, "outside the range the hardware can mean")
+                else:
+                    self._rejected_keys.discard("grid_power")
+                    snapshot["grid_power"] = grid_power
 
         # Telemetry-only: the enum says which storage is attached, and the
         # label it resolves to is what the device entry calls itself.
         storage = snapshot.pop("storage_product_model", None)
         if storage is not None:
             self._storage_model = _STORAGE_MODELS.get(int(storage)) or self._storage_model
+
+        # Whether this driver may command at all. See _update_pv_gate.
+        self._update_pv_gate(snapshot)
 
         for index in (1, 2, 3):
             if snapshot.get(f"pack{index}_serial_number") or snapshot.get(
@@ -745,6 +882,19 @@ class HuaweiSolarDriver(BatteryDriver):
             min(self._ceiling("charge"), int(net_power_w)),
         )
 
+        refused = applied if self._refuses(applied) else None
+        if refused is not None:
+            # A forcible command on this hybrid is not a request but a ceiling:
+            # the inverter produces exactly what the command asks for and
+            # curtails the rest of the roof. Measured with a 315 W charge
+            # standing: 288 W harvested, and 5054 W six seconds after it ended.
+            # A discharge does the same, holding the tracker down entirely.
+            #
+            # So while there is light on the panels this driver commands
+            # nothing. The inverter's own regulation harvests everything and
+            # runs the battery from it, which is what the release hands back to.
+            applied = 0
+
         if not self._should_write(applied):
             # Nothing was sent, so report what is actually in force rather than
             # what was asked for. Echoing the request would tell the control
@@ -755,6 +905,17 @@ class HuaweiSolarDriver(BatteryDriver):
             return SetpointResult(
                 ok=True, net_power_w=held, confirmed=False,
                 applied=self._echo(held),
+            )
+
+        if refused is not None:
+            # Logged here rather than at the refusal itself: the gate refuses on
+            # every control cycle of a lit day, and only the cycle that actually
+            # sends the release is news.
+            _LOGGER.info(
+                "Huawei driver: releasing instead of commanding %dW — a forcible "
+                "command caps this inverter's own production while the sun is on "
+                "the panels",
+                refused,
             )
 
         if self._direct_write:
@@ -895,6 +1056,176 @@ class HuaweiSolarDriver(BatteryDriver):
             applied=echo,
         )
 
+    def _gate_closed(self) -> bool:
+        """Whether the roof is producing enough to be worth protecting."""
+        return self._pv_lit or bool(self._pv_probe_until)
+
+    def _refuses(self, applied: int) -> bool:
+        """Whether the gate refuses this particular command.
+
+        **Discharge is refused outright.** A forcible discharge serves the
+        house from the battery and leaves the tracker down entirely — 374 V at
+        0.00 A — so the whole roof is lost for as long as it stands. There is
+        nothing to weigh.
+
+        **Charge is refused only where it would bind.** A forcible command is a
+        ceiling on production, and a ceiling above what the array can reach is
+        not a constraint at all. Measured 2 September on a cloudless morning,
+        with an irradiance sensor and a separate array as controls:
+
+        * 400 W commanded against 1839 W of harvest produced **363 W** — the
+          roof cut to a fifth while irradiance held, recovering to 1936 W seven
+          seconds after the release;
+        * 3000 W commanded against 1936 W produced **2020 W**, tracking the sun
+          as if nothing had been sent.
+
+        So a charge at or above the harvest costs nothing — and that is the one
+        charge worth having, the cheap-price slot in the middle of a lit day,
+        which a symmetric gate refuses for no gain.
+
+        The rule is self-stabilising, which is what makes it safe to compare
+        against a harvest read while commanding: an allowed charge is never a
+        binding cap, so the reading stays true MPP exactly while this driver is
+        commanding; and a refused charge is never sent, so it cannot suppress
+        the evidence that refused it. The one way out of that is the sun rising
+        to meet a standing command, which :meth:`_update_pv_gate` detects by
+        refusing to believe a harvest that has converged on it.
+
+        A charge is therefore allowed only where it clears the harvest by the
+        same hysteresis band that :meth:`_update_pv_gate` needs in order to
+        believe the reading. Allowing one it would then disbelieve costs a
+        release, a re-read, and a fresh command every ramp interval for as long
+        as the harvest sits in the gap — a flip-flop out of steady sunlight,
+        made of exactly the writes this inverter answers by derating the array.
+        """
+        if applied == 0 or not self._gate_closed():
+            return False
+        if applied < 0:
+            return True
+        if self._pv_harvest_w is None:
+            # No harvest this driver can believe. Refuse, as the symmetric gate
+            # always did — a wrong "allow" curtails the roof, a wrong "refuse"
+            # only costs a charge.
+            return True
+        return applied <= self._pv_harvest_w + _PV_HARVEST_HYSTERESIS_W
+
+    def _update_pv_gate(self, snapshot: dict) -> None:
+        """Decide whether the roof is producing enough to leave alone.
+
+        Two signals, and neither is sufficient by itself.
+
+        **String voltage says whether it is day**, and it survives our own
+        commands: a forcible discharge holds the tracker down and the panels
+        sit at open-circuit voltage — 374 V at 0.00 A — so voltage still reads
+        daylight. What it cannot do is tell a bright morning from a dim one. An
+        overcast dawn stands near 300 V while the array makes 50 W, and
+        refusing to command there costs the house a discharge it needs, for
+        nothing. Measured across three dawns on the reference installation,
+        that band runs 45-50 minutes.
+
+        **Harvested power says how much there is to lose**, and is the quantity
+        that actually matters — but a low reading is only honest while this
+        driver is released. Once a command stands, the production it suppresses
+        is our own artefact, and gating on it would read a curtailed roof as
+        darkness, keep commanding, and keep the roof curtailed. That is the
+        failure the voltage test was introduced to stop: a discharge commanded
+        at 04:32 against a dark sky, still standing at 09:22.
+
+        A *high* reading is a different matter. Our command can only ever push
+        this number down, never up, so production above the threshold is
+        decisive whatever the driver is doing — that is what hands control back
+        at sunrise without waiting for anything.
+
+        A low reading while commanding is the one ambiguous case, and the only
+        one that needs a probe: let go, wait for the tracker to find its own
+        maximum, and read again. A probe costs seconds of curtailment. Not
+        probing costs a day of it.
+        """
+        now = asyncio.get_running_loop().time()
+
+        voltages = [
+            snapshot.get(f"pv{index}_voltage")
+            for index in range(1, self._pv_strings + 1)
+        ]
+        if any(volts is not None for volts in voltages):
+            self._strings_lit = any(
+                volts is not None and volts > _PV_LIT_VOLTAGE_V for volts in voltages
+            )
+
+        if not self._strings_lit:
+            # Night needs no second opinion, and nothing is being curtailed.
+            self._pv_harvest_w = 0.0
+            self._pv_lit = False
+            self._pv_probe_until = 0.0
+            self._pv_verdict_monotonic = now
+            return
+
+        harvest = snapshot.get("solar_power")
+        if harvest is None:
+            # No reading is not evidence either way; the last verdict stands.
+            return
+
+        # Whether the reading can be believed depends on what this driver has
+        # standing. Nothing: it is the roof's own answer. A charge clear of the
+        # harvest: the ceiling is never reached, so the tracker is still at its
+        # own maximum — that is what lets an allowed charge keep its evidence
+        # alive. A charge the harvest has converged on, or any discharge: the
+        # number is our own doing and means nothing.
+        #
+        # This governs the *value*, not the verdict. A high reading still says
+        # the roof is producing whatever this driver is doing, because a command
+        # can only push it down — but a floor is not a maximum, and only a
+        # maximum is safe to compare a charge against.
+        standing = self._last_written_w or 0
+        if standing == 0:
+            trustworthy = now - self._last_write_monotonic >= _PV_PROBE_SETTLE_S
+        elif standing > 0:
+            trustworthy = standing > float(harvest) + _PV_HARVEST_HYSTERESIS_W
+        else:
+            trustworthy = False
+        # Refusing to guess is what makes the sun rising past a standing charge
+        # self-correcting: the charge is refused on the next cycle, the release
+        # restores a true reading, and the decision is retaken against it.
+        self._pv_harvest_w = float(harvest) if trustworthy else None
+
+        # Latching, with the band above on the way in and below on the way out.
+        threshold = _PV_HARVEST_THRESHOLD_W + (
+            -_PV_HARVEST_HYSTERESIS_W if self._pv_lit else _PV_HARVEST_HYSTERESIS_W
+        )
+        if float(harvest) > threshold:
+            self._pv_lit = True
+            self._pv_verdict_monotonic = now
+            self._pv_probe_until = 0.0
+            return
+
+        if trustworthy:
+            # A low reading this driver can believe is the roof's own answer,
+            # and the battery is ours to command.
+            self._pv_lit = False
+            self._pv_verdict_monotonic = now
+            self._pv_probe_until = 0.0
+            return
+
+        if self._pv_probe_until:
+            if now >= self._pv_probe_until:
+                # The release never reached the hardware — the write was
+                # refused, or something else is commanding this battery.
+                # Stop pretending to measure and wait out the interval.
+                _LOGGER.debug(
+                    "Huawei driver: PV probe expired without a usable reading"
+                )
+                self._pv_probe_until = 0.0
+                self._pv_verdict_monotonic = now
+            return
+
+        if now - self._pv_verdict_monotonic >= _PV_PROBE_INTERVAL_S:
+            _LOGGER.info(
+                "Huawei driver: releasing briefly to re-read the roof — %.0fW "
+                "reported while commanding is not evidence of darkness",
+                float(harvest),
+            )
+            self._pv_probe_until = now + _PV_PROBE_WINDOW_S
+
     def _should_write(self, applied: int) -> bool:
         """Whether this set-point is worth four Modbus writes and a 10 s ramp."""
         if self._last_written_w is None:
@@ -967,7 +1298,21 @@ class HuaweiSolarDriver(BatteryDriver):
         The subtraction deliberately excludes this battery's own contribution:
         the ceiling has to describe what PV occupies, not what the battery is
         currently doing, or the limit would chase its own output and oscillate.
+
+        Zero while the PV gate is closed, which is the honest answer and not a
+        special case. The allocator hands out shares against this limit and
+        then believes the battery was served; leaving the static envelope in
+        place would have it allocate a discharge that ``apply_setpoint`` is
+        about to refuse, so the fleet under-delivers and no other battery picks
+        up the slack. Saying zero up front moves that share to a battery that
+        can actually deliver it.
+
+        There is no charge equivalent — the allocator has no comparable seam on
+        that side, so a refused charge is still invisible to it. See §13.9 of
+        the driver assessment.
         """
+        if self._refuses(-1):
+            return 0
         ceiling = data.get("inverter_max_power")
         ac_power = data.get("inverter_ac_power")
         battery_power = data.get("battery_power")
@@ -1005,6 +1350,16 @@ class HuaweiSolarDriver(BatteryDriver):
             # cycle, so they must keep being polled even with their entities off.
             "inverter_max_power", "inverter_ac_power", "battery_power",
             "charging_cutoff_capacity", "discharging_cutoff_capacity",
+            # Inputs of the PV gate (see _update_pv_gate). Without these the
+            # gate cannot form a verdict at all: the harvest reads as absent, so
+            # the verdict stays at its initial "not lit" and the driver commands
+            # through full sun — the failure the gate exists to prevent, put
+            # back by an entity toggle. Solar Power is user-facing, and the
+            # string voltages are enabled_by_default False and only arrive
+            # dragged along by mppt{n}_power, so there are two switches between
+            # this gate and its evidence.
+            "solar_power",
+            *(f"pv{index}_voltage" for index in range(1, _MAX_PV_STRINGS + 1)),
         })
 
     # --- concrete methods the coordinator calls without isinstance guards ----

@@ -64,6 +64,155 @@ def _normalise_power_limit(value) -> int:
         return 0
 
 
+def _stamp_native_daily_reset_dates(coordinator) -> None:
+    """Date-stamp daily energy values a device counts for itself.
+
+    The system totals refuse to add up unless every battery's daily figure is
+    marked as belonging to today — a guard against summing one battery's fresh
+    value with another's from before midnight. Only the derived counter stamps
+    that mark, because until now every driver needed one.
+
+    A driver whose device keeps its own daily counters never gets that sensor,
+    so it never carried the mark, and one such battery in a fleet zeroed the
+    system totals outright: 10.3 kWh charged on one battery and 3.97 on the
+    other, with the overview reading 0.00.
+
+    The poll happening today does not make the *value* today's. A device keeps
+    its own midnight, and for a few minutes either side of ours its counter
+    still holds yesterday's accumulation. Marking that as today let the system
+    aggregate add a battery's fresh 0.00 to another's stale 14.13 and latch the
+    sum: the aggregate refuses same-day decreases, so the wrong figure stood
+    until the real total grew past it — all day, in the observed case.
+
+    So the mark waits for evidence that the device's own counter has turned,
+    which is the value dropping below what was last seen. Until then the
+    previous day's mark stays and the aggregate treats the sum as incomplete,
+    which is the honest answer: better no total than a wrong one that sticks.
+
+    A counter last seen at zero carries nothing stale, so it needs no such
+    evidence. This assumes the device does reset daily — the capability that
+    gates this function is the claim that it does.
+    """
+    if not getattr(coordinator.capabilities, "has_daily_energy_counters", False):
+        return
+    if not coordinator.data:
+        return
+    today = dt_util.now().date().isoformat()
+    seen = getattr(coordinator, "_native_daily_seen", None)
+    if seen is None:
+        seen = {}
+        coordinator._native_daily_seen = seen
+
+    for key in ("total_daily_charging_energy", "total_daily_discharging_energy"):
+        value = coordinator.data.get(key)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        previous = seen.get(key)
+        if previous is None:
+            # Nothing to compare against — first sight, or a restart. The
+            # counter is whatever the device says it is now.
+            stamp = today
+        else:
+            previous_date, previous_value = previous
+            if previous_date == today or previous_value <= 0 or value < previous_value:
+                stamp = today
+            else:
+                # Our day has turned, the device's has not. Leave the old mark.
+                stamp = previous_date
+
+        seen[key] = (stamp, value)
+        coordinator.data[f"{key}_reset_date"] = stamp
+
+
+def _persist_device_cap(coordinator, key: str, value: int) -> None:
+    """Write a device-reported ceiling back to config_entry.data.
+
+    The in-memory ceiling alone is not enough: the system-level power sliders
+    derive their bounds from ``config_entry.data`` (see
+    ``integration_const.total_battery_power``), which until now only ever held
+    the figure the config flow probed at setup. Raising a soft-max battery's
+    limit in the vendor app therefore moved the per-battery slider but left the
+    system slider pinned to the old value, reload or not (issue #449).
+
+    Only the soft-max branch calls this. Writable-register drivers report the
+    user's *configured* ceiling, and persisting that would overwrite what the
+    user wrote.
+    """
+    persist = getattr(coordinator, "persist_battery_config", None)
+    if persist is None:
+        return
+    persist(key, int(value))
+
+
+def _sync_device_reported_limits(coordinator) -> None:
+    """Adopt the power ceilings the device reports, ignoring a zero.
+
+    A reported ceiling of zero is not a limit, it is a missing answer. A
+    Marstek came back from a restart with both power registers reading 0,
+    and adopting that shut the battery out of every allocation: it could
+    neither charge nor discharge, and nothing would ever write those
+    registers again, because the controller had stopped addressing a
+    battery it believed could do nothing. The last good figure stands
+    instead, and the mismatch is worth a line in the log.
+    """
+    for key in ("max_charge_power", "max_discharge_power"):
+        if key in coordinator.data and not coordinator.data[key]:
+            _LOGGER.warning(
+                "[%s] Device reports %s = 0; keeping the last known ceiling. "
+                "The battery may have lost its limits on a restart — writing "
+                "the corresponding number entity restores them.",
+                coordinator.name, key,
+            )
+    if coordinator.data.get("max_charge_power"):
+        device_cap = int(coordinator.data["max_charge_power"])
+        # Soft-max drivers (Zendure telemetry, Anker read-only sensor) and
+        # Venus E v2/v3 report the physical/device ceiling. Writable
+        # register drivers report the user's configured ceiling instead.
+        if coordinator.needs_software_max_charge or coordinator.needs_software_power_cap:
+            # getattr: a lightweight coordinator double may not carry the
+            # attribute until the setter below creates it.
+            changed = getattr(coordinator, "device_max_charge_power", None) != device_cap
+            coordinator.device_max_charge_power = device_cap
+            if changed:
+                _persist_device_cap(
+                    coordinator, "device_max_charge_power", coordinator.device_max_charge_power
+                )
+        else:
+            coordinator.configured_max_charge_power = device_cap
+        # Keep the legacy alias synchronized for lightweight coordinator
+        # doubles that do not have the normalized backing fields.
+        if not hasattr(coordinator, "_configured_max_charge_power"):
+            coordinator.max_charge_power = (
+                min(device_cap, getattr(coordinator, "user_max_charge_power", device_cap))
+                if coordinator.needs_software_max_charge or coordinator.needs_software_power_cap
+                else device_cap
+            )
+    if coordinator.data.get("max_discharge_power"):
+        device_cap = int(coordinator.data["max_discharge_power"])
+        if coordinator.needs_software_max_discharge or coordinator.needs_software_power_cap:
+            # getattr: a lightweight coordinator double may not carry the
+            # attribute until the setter below creates it.
+            changed = getattr(coordinator, "device_max_discharge_power", None) != device_cap
+            coordinator.device_max_discharge_power = device_cap
+            if changed:
+                _persist_device_cap(
+                    coordinator, "device_max_discharge_power", coordinator.device_max_discharge_power
+                )
+        else:
+            coordinator.configured_max_discharge_power = device_cap
+        if not hasattr(coordinator, "_configured_max_discharge_power"):
+            coordinator.max_discharge_power = (
+                min(device_cap, getattr(coordinator, "user_max_discharge_power", device_cap))
+                if coordinator.needs_software_max_discharge or coordinator.needs_software_power_cap
+                else device_cap
+            )
+
+
 def group_scan_interval_s(
     group_keys: tuple[str, ...],
     nominal_interval_s: float,
@@ -109,6 +258,54 @@ def is_untrusted_energy_reading(key: str, value, prev) -> bool:
     return False
 
 
+def _schedule_setup_reload_if_deferred(coordinator) -> None:
+    """Reload the entry once a battery that missed its setup answers.
+
+    A battery that was unreachable during setup was created without the
+    hardware configuration write, without the driver's connect-time entity
+    definitions (model detection, pack discovery) and without a first telemetry
+    snapshot. Writing the configuration from here would leave the other two
+    missing, and entities cannot be added to a platform that already finished
+    setting up, so the battery is adopted by re-running setup with the device
+    present. One-shot: the reloaded runtime only re-arms the flag if the battery
+    is unreachable again.
+
+    This depends on the unreachable battery still getting its entities at setup:
+    they are what subscribe to the coordinator, and without a subscriber
+    DataUpdateCoordinator never schedules a poll, so nothing would ever notice
+    the battery answering. Every driver therefore has to seed its entity
+    definitions in ``__init__`` (connect may only refine them), or a battery of
+    that brand that starts unreachable would stay that way until a restart.
+    """
+    if not getattr(coordinator, "reload_entry_when_reachable", False):
+        return
+    coordinator.reload_entry_when_reachable = False
+    entry = getattr(coordinator, "_config_entry", None)
+    if entry is None:
+        return
+    # The flag is per battery, so several batteries that were all switched off
+    # would each schedule a full teardown/rebuild of the same entry when they
+    # come back together. One reload adopts all of them. The marker lives in the
+    # entry's runtime dict, which setup rebuilds, so the reloaded runtime starts
+    # unmarked.
+    runtime = coordinator.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if isinstance(runtime, dict):
+        if runtime.get("setup_reload_scheduled"):
+            _LOGGER.info(
+                "[%s] Battery answered after starting unreachable - joining the "
+                "reload already scheduled for this entry",
+                coordinator.name,
+            )
+            return
+        runtime["setup_reload_scheduled"] = True
+    _LOGGER.info(
+        "[%s] Battery answered after starting unreachable - reloading the "
+        "integration to complete its setup",
+        coordinator.name,
+    )
+    coordinator.hass.config_entries.async_schedule_reload(entry.entry_id)
+
+
 class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
     """Manages polling for data from a single Marstek Venus battery."""
 
@@ -124,6 +321,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                  zendure_model: str = ZENDURE_MODEL_2400AC_PRO,
                  hoymiles_model: str | None = None,
                  serial_port: str | None = None,
+                 rs485_gateway: bool = False,
                  esphome_device_id: str | None = None,
                  huawei_battery_device_id: str | None = None,
                  huawei_direct_write: bool = False,
@@ -159,6 +357,9 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         # of TCP (discussion #350); None = TCP. host/port still identify the
         # battery (device_key, naming); the link uses this path. Marstek only.
         self.serial_port = serial_port
+        # Marstek reached through an RS485 gateway instead of its own Modbus
+        # TCP server: drops the inter-message wait (issue #411).
+        self.rs485_gateway = bool(rs485_gateway)
         self.consumption_sensor = consumption_sensor
         self.brand = brand
         self.ems_version = ems_version
@@ -257,9 +458,19 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         # read before the first write returns None rather than raising.
         self._last_write_failure_reason = None
         self._last_rs485_reenable_success = None
+        # Set by setup for a battery that did not answer: setup no longer fails
+        # the whole config entry over one unreachable battery, so this battery
+        # was created without the hardware configuration write, the driver's
+        # connect-time entity definitions and its first telemetry. The entry is
+        # reloaded once the battery answers, which is the only path that
+        # rebuilds all three. See _schedule_setup_reload_if_deferred.
+        self.reload_entry_when_reachable = False
 
         # Timestamp-based update tracking
         self._last_update_times = {}
+        # Per key, not per group: a group is stamped when any one of its keys is
+        # stored, so it cannot tell which values a partial read refreshed.
+        self._key_update_times = {}
         self._critical_group_failures = {}
         self._refresh_count = 0
         self._refresh_times: deque[float] = deque(maxlen=256)
@@ -350,6 +561,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                 max_discharge_power_w=self.configured_max_discharge_power,
                 serial_port=self.serial_port,
                 ems_version=self.ems_version,
+                rs485_gateway=self.rs485_gateway,
             )
 
         # The driver declares whether its native discharge counter omits a power
@@ -629,6 +841,19 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         """
         return self.brand == "marstek" and self.battery_version in ("v2", "v3")
 
+    def readings_from_same_poll(self, key_a: str, key_b: str) -> bool:
+        """Whether two keys were last stored by the same poll cycle.
+
+        A key whose read fails keeps its previous value in ``data``. Every key
+        stored in one cycle shares the cycle's timestamp, so equal timestamps
+        mean both values came from the same poll. Tracked per key because a
+        group can be read partially: the ESPHome driver puts every key in one
+        group and omits the unavailable ones. A key never read is not a match.
+        """
+        times = getattr(self, "_key_update_times", {})
+        stamp_a, stamp_b = times.get(key_a), times.get(key_b)
+        return stamp_a is not None and stamp_a == stamp_b
+
     @property
     def is_available(self) -> bool:
         """Return whether the battery is currently reachable."""
@@ -847,6 +1072,35 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
             # driver.connect() internally closes the old client and creates a new one
             connected = await self.driver.connect()
 
+            # A TCP accept is not proof the battery answers. Marstek V150 firmware
+            # accepts the socket and then ignores every Modbus frame (#445), and
+            # taking connect() at its word cleared _consecutive_failures on every
+            # attempt: the counter never reached _max_failures_before_suspend, so
+            # the two-minute back-off never engaged and we re-opened the socket
+            # every few polls indefinitely against an already choked stack. One
+            # probe read separates a live link from a zombie one. Push drivers
+            # serve read_telemetry from cache, where a probe proves nothing —
+            # unless the driver dates that cache and drops it once the upstream
+            # feed goes quiet (telemetry_liveness_checked). The ESPHome bridge
+            # needs exactly this: connect() only re-resolves registry entries, so
+            # it succeeds against a wedged bus and would clear the counter every
+            # third poll, so the suspend back-off never engages (issue #452).
+            if connected and (
+                not self.capabilities.push_telemetry
+                or getattr(self.capabilities, "telemetry_liveness_checked", False)
+            ):
+                try:
+                    connected = bool(await self.driver.read_telemetry(["battery_soc"]))
+                except Exception as err:
+                    _LOGGER.debug("[%s] Reconnection probe raised: %s", self.name, err)
+                    connected = False
+                if not connected:
+                    _LOGGER.warning(
+                        "[%s] Fresh connection opened but the battery answered no "
+                        "telemetry - still unreachable, backing off",
+                        self.name,
+                    )
+
             if connected:
                 sync_definitions = getattr(self, "_sync_driver_definitions", None)
                 if sync_definitions is not None:
@@ -879,6 +1133,9 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                     else:
                         self._last_rs485_reenable_success = False
                         _LOGGER.warning("[%s] Failed to re-enable RS485 after reconnection", self.name)
+
+                _schedule_setup_reload_if_deferred(self)
+
             else:
                 self._is_connected = False
                 _LOGGER.warning("[%s] Fresh reconnection failed", self.name)
@@ -1098,6 +1355,13 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         )
         # Cell voltage keys are always needed by the balance monitor
         dependency_keys_set.update({"max_cell_voltage", "min_cell_voltage"})
+        # ...and so is any finer breakdown the driver has. A Venus A/D's
+        # 37007/37008 describe pack 1 alone, so the delta is attributed per pack
+        # (#439); those entities ship disabled, and the reading must not depend on
+        # the user enabling them.
+        dependency_keys_set.update(
+            getattr(self.driver, "balance_dependency_keys", frozenset())
+        )
         # Control registers must keep polling even when the user disables their
         # number entities, otherwise the control loop loses its commanded power,
         # power caps and SOC cutoffs from coordinator.data and stops driving the
@@ -1238,6 +1502,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                         continue
 
                 updated_data[key] = value
+                self._key_update_times[key] = now
                 stored += 1
                 if DEBUG_POLL_SENSOR_VALUES and group.scan_interval == "high":
                     _LOGGER.debug("[%s] Updated %s: %s", self.name, key, value)
@@ -1280,6 +1545,10 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             self._consecutive_failures = 0
             self._is_connected = True
+            # A battery can also come back through a plain successful read (a
+            # client that reconnects itself, an entity-backed driver whose
+            # source turned available), without async_reconnect_fresh running.
+            _schedule_setup_reload_if_deferred(self)
         else:
             # All attempted reads failed - connection issue
             self._consecutive_failures += 1
@@ -1386,35 +1655,8 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         # coordinator.min_soc stays at the construction default across restarts.
         if "min_soc" in self.data:
             self.min_soc = int(self.data["min_soc"])
-        if "max_charge_power" in self.data:
-            device_cap = int(self.data["max_charge_power"])
-            # Soft-max drivers (Zendure telemetry, Anker read-only sensor) and
-            # Venus E v2/v3 report the physical/device ceiling. Writable
-            # register drivers report the user's configured ceiling instead.
-            if self.needs_software_max_charge or self.needs_software_power_cap:
-                self.device_max_charge_power = device_cap
-            else:
-                self.configured_max_charge_power = device_cap
-            # Keep the legacy alias synchronized for lightweight coordinator
-            # doubles that do not have the normalized backing fields.
-            if not hasattr(self, "_configured_max_charge_power"):
-                self.max_charge_power = (
-                    min(device_cap, getattr(self, "user_max_charge_power", device_cap))
-                    if self.needs_software_max_charge or self.needs_software_power_cap
-                    else device_cap
-                )
-        if "max_discharge_power" in self.data:
-            device_cap = int(self.data["max_discharge_power"])
-            if self.needs_software_max_discharge or self.needs_software_power_cap:
-                self.device_max_discharge_power = device_cap
-            else:
-                self.configured_max_discharge_power = device_cap
-            if not hasattr(self, "_configured_max_discharge_power"):
-                self.max_discharge_power = (
-                    min(device_cap, getattr(self, "user_max_discharge_power", device_cap))
-                    if self.needs_software_max_discharge or self.needs_software_power_cap
-                    else device_cap
-                )
+        _sync_device_reported_limits(self)
+        _stamp_native_daily_reset_dates(self)
 
         if updated_data:
             _LOGGER.debug(

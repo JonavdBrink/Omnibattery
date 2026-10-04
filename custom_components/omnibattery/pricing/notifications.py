@@ -7,6 +7,8 @@ controller keeps the thin ``_send_*`` wrappers that read its config and push the
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 
 def _forecast_notification_context(decision: dict) -> dict:
     """Describe the energy horizon and forecast source consistently."""
@@ -23,8 +25,20 @@ def _forecast_notification_context(decision: dict) -> dict:
     days = int(decision.get("days_in_history", 0) or 0)
     profile_days = int(decision.get("profile_days", 0) or 0)
 
+    horizon_end = decision.get("energy_horizon_end")
+    horizon_extended = isinstance(horizon_end, datetime) and (
+        horizon_end.hour != 0 or horizon_end.minute != 0
+    )
+    horizon_label = (
+        f"until sunrise ({horizon_end.strftime('%H:%M')})"
+        if horizon_extended
+        else "until midnight"
+    )
+    overnight_kwh_raw = decision.get("overnight_consumption_kwh")
+    overnight_kwh = float(overnight_kwh_raw) if overnight_kwh_raw is not None else None
+
     if is_remaining:
-        consumption_label = "Home consumption remaining until midnight"
+        consumption_label = f"Home consumption remaining {horizon_label}"
         uses_profile = scope == "remaining_profile" or consumption_source == "profile"
         if uses_profile:
             basis = "learned 15-minute profile"
@@ -37,7 +51,11 @@ def _forecast_notification_context(decision: dict) -> dict:
         if not uses_profile and decision.get("consumption_accumulator_ready"):
             basis += ", adjusted with today's consumption"
     else:
-        consumption_label = "Expected home consumption today"
+        consumption_label = (
+            f"Expected home consumption {horizon_label}"
+            if horizon_extended
+            else "Expected home consumption today"
+        )
         if scope == "daily_profile" or consumption_source == "profile":
             sample_count = profile_days or days
             basis = "learned 15-minute profile"
@@ -57,19 +75,64 @@ def _forecast_notification_context(decision: dict) -> dict:
         "remaining",
         "remaining_sensor",
     }
-    if is_remaining:
-        solar_label = "Solar remaining until midnight"
-    elif solar_is_remaining:
-        solar_label = "Solar remaining today"
-    else:
-        solar_label = "Solar forecast today"
+    solar_label = "Solar remaining today" if solar_is_remaining else "Solar forecast today"
     return {
         "is_remaining": is_remaining,
         "consumption_kwh": consumption_kwh,
         "consumption_label": consumption_label,
         "consumption_basis": basis,
         "solar_label": solar_label,
+        "horizon_extended": horizon_extended,
+        "horizon_label": horizon_label,
+        "overnight_kwh": overnight_kwh,
     }
+
+
+def _build_forecast_lines(context: dict, solar_str: str, consumption_for_horizon: float) -> str:
+    """Render the shared solar/consumption forecast block, plus overnight if any."""
+    lines = (
+        f"☀️ {context['solar_label']}: {solar_str}\n"
+        f"📊 {context['consumption_label']}: {consumption_for_horizon:.2f} kWh\n"
+        f"   Basis: {context['consumption_basis']}\n"
+    )
+    overnight_kwh = context.get("overnight_kwh")
+    if overnight_kwh is not None and overnight_kwh > 0:
+        lines += f"🌙 Overnight until sunrise: {overnight_kwh:.2f} kWh\n"
+    return lines
+
+
+def _horizon_text(context: dict, *, with_for: bool = False) -> str:
+    """Describe the remaining horizon consistently for 'not needed' messages."""
+    if not context["is_remaining"]:
+        return "today"
+    prefix = "for " if with_for else ""
+    if context["horizon_extended"]:
+        return f"{prefix}the rest of today and tonight {context['horizon_label']}"
+    return f"{prefix}the rest of today"
+
+
+def _max_charge_power_str(
+    max_contracted_power,
+    max_charge_capacity=None,
+    peak_limit=None,
+    *,
+    contracted_label: str = "contracted",
+) -> str:
+    """Render the effective grid-charge ceiling and the limits behind it.
+
+    Peak shaving caps grid import, so it caps grid charging too (see
+    ``_predictive_charge_ceiling``); it must appear here or the notification
+    promises a power the controller will never command.
+    """
+    limits = [max_contracted_power]
+    parts = [f"{contracted_label}: {max_contracted_power:g}W"]
+    if max_charge_capacity is not None:
+        limits.append(max_charge_capacity)
+        parts.append(f"batteries: {max_charge_capacity:g}W")
+    if peak_limit:
+        limits.append(peak_limit)
+        parts.append(f"peak limit: {peak_limit:g}W")
+    return f"{min(limits):g}W (" + ", ".join(parts) + ")"
 
 
 def format_predictive_notification_message(
@@ -78,6 +141,7 @@ def format_predictive_notification_message(
     *,
     max_contracted_power,
     max_charge_capacity,
+    peak_limit=None,
     charging_time_slot,
 ) -> tuple[str, str]:
     """Format notification title and message from decision data.
@@ -101,14 +165,9 @@ def format_predictive_notification_message(
     consumption_for_horizon = context["consumption_kwh"]
 
     solar_str = f"{solar_forecast:.2f} kWh" if solar_forecast is not None else "unavailable"
-    forecast_lines = (
-        f"☀️ {context['solar_label']}: {solar_str}\n"
-        f"📊 {context['consumption_label']}: {consumption_for_horizon:.2f} kWh\n"
-        f"   Basis: {context['consumption_basis']}\n"
-    )
-    effective_power = min(max_contracted_power, max_charge_capacity)
-    power_str = (
-        f"{effective_power}W (contracted: {max_contracted_power}W, batteries: {max_charge_capacity}W)"
+    forecast_lines = _build_forecast_lines(context, solar_str, consumption_for_horizon)
+    power_str = _max_charge_power_str(
+        max_contracted_power, max_charge_capacity, peak_limit
     )
 
     # Safe mode: no solar forecast
@@ -142,7 +201,7 @@ def format_predictive_notification_message(
     # Sufficient energy — no charging needed
     if not should_charge:
         title = "Predictive Charging: Not required"
-        horizon_text = "the rest of today" if context["is_remaining"] else "today"
+        horizon_text = _horizon_text(context)
         message = (
             f"✓ Sufficient energy for {horizon_text}\n\n"
             f"🔋 Battery: {avg_soc:.0f}% ({usable_energy:.2f} kWh usable)\n"
@@ -221,6 +280,7 @@ def format_dynamic_pricing_notification(
     arbitrage_ceiling=None,
     max_contracted_power,
     max_charge_capacity,
+    peak_limit=None,
 ) -> tuple[str, str]:
     """Format dynamic pricing evaluation notification."""
     avg_soc = decision_data.get("avg_soc", 0)
@@ -231,11 +291,7 @@ def format_dynamic_pricing_notification(
     context = _forecast_notification_context(decision_data)
     solar_str = f"{solar_forecast:.2f} kWh" if solar_forecast is not None else "N/A"
     consumption_for_horizon = context["consumption_kwh"]
-    forecast_lines = (
-        f"☀️ {context['solar_label']}: {solar_str}\n"
-        f"📊 {context['consumption_label']}: {consumption_for_horizon:.2f} kWh\n"
-        f"   Basis: {context['consumption_basis']}\n"
-    )
+    forecast_lines = _build_forecast_lines(context, solar_str, consumption_for_horizon)
     # The arbitrage ceiling is only the binding constraint when it undercuts the
     # static one; otherwise it is reported for information but decided nothing.
     arbitrage_binding = arbitrage_ceiling is not None and (
@@ -255,7 +311,7 @@ def format_dynamic_pricing_notification(
     if schedule is None or not schedule.selected_slots:
         if not decision_data.get("should_charge", False):
             title = "Predictive Charging: Price Optimization - NOT needed"
-            horizon_text = "the rest of today" if context["is_remaining"] else "today"
+            horizon_text = _horizon_text(context)
             message = (
                 f"✓ Sufficient energy for {horizon_text}\n\n"
                 f"🔋 Battery: {avg_soc:.0f}% ({usable_energy:.2f} kWh usable)\n"
@@ -333,12 +389,16 @@ def format_dynamic_pricing_notification(
                 f"Average price: {schedule.average_price:.4f} {unit}\n"
                 f"Estimated cost: ~{schedule.estimated_cost:.2f} {cost_unit}\n"
                 f"{price_config_line}"
-                f"Max charge power: {min(max_contracted_power, max_charge_capacity)}W "
-                f"(ICP: {max_contracted_power}W, batteries: {max_charge_capacity}W)"
+                "Max charge power: " + _max_charge_power_str(
+                    max_contracted_power,
+                    max_charge_capacity,
+                    peak_limit,
+                    contracted_label="ICP",
+                )
             )
         elif not schedule.charging_needed:
             title = f"Predictive Charging: Price Info - {hours_label} cheapest"
-            horizon_text = "for the rest of today" if context["is_remaining"] else "today"
+            horizon_text = _horizon_text(context, with_for=True)
             message = (
                 f"✓ No grid charging needed {horizon_text}\n\n"
                 f"🔋 Battery: {avg_soc:.0f}% ({usable_energy:.2f} kWh usable)\n"
@@ -389,8 +449,12 @@ def format_dynamic_pricing_notification(
                 f"Average price: {schedule.average_price:.4f} {unit}\n"
                 f"Estimated cost: ~{schedule.estimated_cost:.2f} {cost_unit}\n"
                 f"{price_config_line}"
-                f"Max charge power: {min(max_contracted_power, max_charge_capacity)}W "
-                f"(ICP: {max_contracted_power}W, batteries: {max_charge_capacity}W)"
+                "Max charge power: " + _max_charge_power_str(
+                    max_contracted_power,
+                    max_charge_capacity,
+                    peak_limit,
+                    contracted_label="ICP",
+                )
             )
 
     return (title, message)
@@ -402,6 +466,7 @@ def format_slot_start_notification(
     *,
     unit: str,
     max_contracted_power,
+    peak_limit=None,
 ) -> tuple[str, str]:
     """Format the 'cheap pricing slot started' notification.
 
@@ -421,7 +486,7 @@ def format_slot_start_notification(
 
     title = f"Predictive Charging STARTED ({slot.price:.4f} {unit})"
     message = (
-        f"⚡ Charging at max {max_contracted_power}W\n"
+        f"⚡ Charging at max {min(max_contracted_power, peak_limit) if peak_limit else max_contracted_power:g}W\n"
         f"Slot: {slot.start.strftime('%H:%M')}-{slot.end.strftime('%H:%M')}\n"
         f"{next_slot_str} · {remaining_str}"
     )
@@ -445,9 +510,7 @@ def format_dp_pre_slot_reevaluation_notification(
     title = f"Predictive Charging: slot {slot.start.strftime('%H:%M')} confirmed — charging needed"
     message = (
         f"🔋 Battery: {avg_soc:.0f}% ({usable_energy:.2f} kWh usable)\n"
-        f"☀️ {context['solar_label']}: {solar_str}\n"
-        f"📊 {context['consumption_label']}: {context['consumption_kwh']:.2f} kWh\n"
-        f"   Basis: {context['consumption_basis']}\n"
+        f"{_build_forecast_lines(context, solar_str, context['consumption_kwh'])}"
         f"⚡ Energy deficit: {energy_deficit:.2f} kWh\n\n"
         f"Slot: {slot.start.strftime('%H:%M')}–{slot.end.strftime('%H:%M')} "
         f"@ {slot.price:.4f} {unit}\n"

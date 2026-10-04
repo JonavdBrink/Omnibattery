@@ -30,6 +30,19 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# Optional telemetry key a driver may publish alongside ``battery_power``.
+#
+# ``battery_power`` is cell-side (+charge / -discharge). On a battery whose PV or
+# an off-grid microinverter feeds the same DC bus, the cells can read "charging"
+# while the AC port is delivering the commanded discharge, and can absorb a
+# commanded charge straight from PV with nothing crossing the AC port at all
+# (issue #399). A driver that can measure the exchange at the device's own AC
+# port publishes it under this key, in the same sign convention as
+# ``battery_power``. Drivers that cannot measure it simply omit the key and the
+# control layer keeps judging delivery from the cells alone.
+DELIVERED_AC_POWER_KEY = "ac_delivered_power"
+
+
 @dataclass(frozen=True)
 class DriverCapabilities:
     """Static, brand/model-specific traits the control layer branches on.
@@ -136,6 +149,23 @@ class DriverCapabilities:
     min_charge_power_w: int = 0
     min_discharge_power_w: int = 0
 
+    # True when a push driver's read_telemetry still proves the source is live
+    # (it drops values whose age says the upstream feed has stalled) rather than
+    # replaying a cache. Only meaningful alongside push_telemetry: it tells the
+    # coordinator the post-reconnect probe read is worth running, so a reconnect
+    # that did not actually restore telemetry cannot clear the failure counter
+    # and starve the back-off. Defaults False (a plain cache read proves nothing).
+    telemetry_liveness_checked: bool = False
+
+    # Inclusive SOC window (percent) each cutoff control may offer. The defaults
+    # are the Venus D's hardware floors, which is what the software-limit entity
+    # hard-coded before these existed; a driver whose hardware means something
+    # else reports its own. A control that offers a value the driver's write path
+    # rejects is worse than no control: the entity shows the new number while the
+    # hardware backstop never moves (#495).
+    charge_cutoff_range: tuple[float, float] = (50.0, 100.0)
+    discharge_cutoff_range: tuple[float, float] = (12.0, 50.0)
+
 
 def has_connected_mppt_pv(coordinator) -> bool:
     """Return whether an MPPT-capable battery has panels connected.
@@ -230,6 +260,21 @@ class BatteryDriver(ABC):
         """Static traits of this battery (see :class:`DriverCapabilities`)."""
 
     @property
+    def dc_coupled(self) -> bool:
+        """Whether photovoltaic input reaches the battery without an AC stage.
+
+        A hybrid inverter charges its battery straight from the strings; an AC
+        battery has to take the same energy through an inverter and back again,
+        and pays a conversion each way. The difference only matters when there is
+        not enough sun for every battery: then the scarce kilowatt-hours are
+        worth putting where the least of them is lost (see
+        ``control/charge_order.py``).
+
+        Defaults to False, which is what an AC battery is.
+        """
+        return False
+
+    @property
     def model_label(self) -> Optional[str]:
         """Human-readable model for display (panel chip / device page).
 
@@ -293,6 +338,18 @@ class BatteryDriver(ABC):
         reads the hardware now; a push driver returns its cached last state.
         Missing/failed values are omitted rather than set to None.
         """
+
+    @property
+    def balance_dependency_keys(self) -> frozenset[str]:
+        """Telemetry the cell-balance monitor needs beyond max/min cell voltage.
+
+        The coordinator keeps these polling even when their entities are
+        disabled, so a driver may expose a finer-grained breakdown as opt-in
+        entities without the balance reading depending on the user enabling them.
+        Empty for drivers whose max/min cell voltage already describes the whole
+        battery.
+        """
+        return frozenset()
 
     @property
     def supplemental_discharge_dependency_keys(self) -> frozenset[str]:

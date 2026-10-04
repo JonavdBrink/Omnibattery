@@ -13,16 +13,48 @@ compatibility with the rest of the control loop:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import UnitOfEnergy
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_conversion import EnergyConverter
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+# States that mean "the device is here and can draw". Kept wider than ``on`` so
+# a device_tracker or a localised text status sensor can serve as the presence
+# entity without a template helper in between. Matched whole, never as a
+# substring: every negative phrasing contains its own positive ("disconnected"
+# contains "connected", "ontladen" contains "laden"), so a substring pass would
+# read every absent state as present. Anything unknown reads as absent, which is
+# the safe direction.
+_PRESENT_STATES: frozenset[str] = frozenset({
+    "on",
+    "true",
+    "home",
+    "present",
+    "connected",   # EN
+    "plugged",     # EN
+    "plugged in",  # EN
+    "verbunden",   # DE
+    "aangesloten", # NL
+    "aanwezig",    # NL
+    "connesso",    # IT
+    "connecté",    # FR
+    "branché",     # FR
+    "conectado",   # ES/PT
+    "connectat",   # CA
+    "charging",    # EN
+    "cargando",    # ES
+    "laden",       # NL/DE
+})
 
 # Substrings that indicate an EV is actively charging, across supported languages.
 # Case-insensitive match against the sensor state string.
@@ -567,6 +599,128 @@ class ExternalLoads:
             return None
         unit = state.attributes.get("unit_of_measurement", "W")
         return raw if unit == "W" else raw * 1000.0
+
+    def _read_sensor_kwh_opt(self, entity_id: str | None) -> float | None:
+        """Energy sibling of _read_sensor_w_opt: read a sensor as kWh.
+
+        Returns None when the sensor is missing, unavailable, unparsable or
+        carries a unit that is not an energy unit, so the caller keeps its
+        no-claim behaviour instead of reserving solar against a number whose
+        magnitude is unknown. Conversion uses Home Assistant's own energy
+        converter, so its unit strings are matched exactly: ``mWh`` (milli)
+        and ``MWh`` (mega) differ only in case.
+        Negative readings are clamped to 0.0 because some upstreams publish a
+        transient -0.0 between sessions.
+        """
+        if not entity_id:
+            return None
+        state = self._hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return None
+        try:
+            raw = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        if not math.isfinite(raw):
+            return None
+        # A missing unit falls through to the converter too, so the "no claim"
+        # decision is logged in one place. Template helpers often carry none.
+        unit = state.attributes.get("unit_of_measurement")
+        try:
+            raw = EnergyConverter.convert(raw, str(unit), UnitOfEnergy.KILO_WATT_HOUR)
+        except (HomeAssistantError, ValueError, TypeError):
+            _LOGGER.debug(
+                "Remaining-demand sensor %s reports unit %s, which is not an "
+                "energy unit; ignoring its claim",
+                entity_id,
+                unit,
+            )
+            return None
+        return max(0.0, raw)
+
+    def claimable_solar_demand_kwh(self) -> float | None:
+        """Σ energy (kWh) excluded devices still expect to take from the sun.
+
+        Eligibility and weighting follow ``consumption_delta_kw`` exactly, so
+        the same demand is never removed twice:
+          - only devices the home sensor already includes may claim; a device
+            it does not see is an additional load the battery is meant to
+            cover, and its demand is not in the consumption forecast either;
+          - ``exclusion_pct`` scales the claim the same way it scales the
+            consumption correction. At 50 % the forecast keeps half the
+            device's demand, so only the other half may be reserved from solar;
+          - ``ev_charger_no_telemetry`` devices are skipped for the same reason
+            they are skipped there: their demand stays inside the consumption
+            forecast, which already covers it.
+
+        A device may also declare a presence entity. Some upstreams keep
+        publishing a remaining demand while the device cannot possibly draw --
+        evcc reports the energy to the vehicle's SOC target whether or not a
+        car is plugged in -- and reserving solar for that takes it away from the
+        battery for nothing.
+
+        Returns None when no device contributes a usable reading, so callers
+        can keep today's behaviour untouched. A device whose presence entity
+        says it is absent contributes 0.0 rather than nothing: it is a reading,
+        and the difference decides whether the intraday re-plan runs.
+        """
+        total: float | None = None
+        for device in self._config_entry.data.get("excluded_devices", []):
+            sensor_id = device.get("remaining_demand_sensor")
+            if not sensor_id:
+                continue
+            if not device.get("enabled", True):
+                continue
+            if device.get("ev_charger_no_telemetry", False):
+                continue
+            if not device.get("included_in_consumption", True):
+                continue
+            if not self._demand_is_present(device):
+                # Zero, not "skip". Callers read None as "no usable reading" and
+                # keep their last reference, which would leave the intraday
+                # re-plan blind to a car that has just left.
+                total = 0.0 if total is None else total
+                continue
+            value = self._read_sensor_kwh_opt(sensor_id)
+            if value is None:
+                continue
+            value *= self._exclusion_factor(device)
+            total = value if total is None else total + value
+        return total
+
+    def _demand_is_present(self, device: dict) -> bool:
+        """Whether this device's declared demand can actually be drawn.
+
+        True when no presence entity is configured, which is every existing
+        installation. With one configured, the state must match one of
+        ``_PRESENT_STATES`` whole. An unavailable, unknown, unrecognised or
+        missing entity is treated as absent, so a broken sensor falls back to
+        not reserving rather than to reserving for a device that may not be
+        there.
+
+        A refusal is logged, because a state nobody anticipated would otherwise
+        zero a claim the user deliberately configured, in silence.
+        """
+        entity_id = device.get("remaining_demand_presence_sensor")
+        if not entity_id:
+            return True
+        state = self._hass.states.get(entity_id)
+        if state is None:
+            _LOGGER.debug(
+                "Presence entity %s does not exist; its device claims no solar",
+                entity_id,
+            )
+            return False
+        value = str(state.state).strip().lower()
+        if value in _PRESENT_STATES:
+            return True
+        _LOGGER.debug(
+            "Presence entity %s reports %s, which does not read as present; "
+            "its device claims no solar",
+            entity_id,
+            state.state,
+        )
+        return False
 
     def _read_home_consumption_w_opt(self, entity_id: str | None) -> float | None:
         """Read Home Consumption only when its balance is currently coherent.

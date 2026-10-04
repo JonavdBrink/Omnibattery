@@ -60,7 +60,13 @@ _REAL_DATETIME = datetime
 # sensor going unavailable at the midnight rollover) silently disables the
 # charge delay for the rest of the day. Keeping them re-evaluable lets the delay
 # re-arm as soon as the data comes back.
-_TRANSIENT_UNLOCK_REASONS = frozenset({"no_forecast"})
+_TRANSIENT_UNLOCK_REASONS = frozenset({"no_forecast", "zero_forecast"})
+
+# Hour until which a zero scalar forecast is treated as "the provider has not
+# published the new day yet" rather than "there is no sun today" (#457). There
+# is no production to lose before it, and a provider that is later still than
+# this unlocks with a re-evaluable reason instead of latching.
+_PROVISIONAL_ZERO_HOLD_HOUR = 1.0
 
 # Fields that describe a completed forecast decision.  The setpoint phase exits
 # before calculating a new decision, so retaining these values there makes the
@@ -99,6 +105,63 @@ def _decision_now() -> datetime:
             microsecond=int(getattr(mocked_now, "microsecond", 0)),
         )
     return now
+
+
+# Status fields the solar balance produces.  A hold that returns before the
+# balance runs clears them, so a fresh deficit never sits beside stale figures.
+_BALANCE_STATUS_FIELDS = (
+    "solar_t_end",
+    "remaining_solar_kwh",
+    "remaining_consumption_kwh",
+    "net_solar_kwh",
+    "charge_time_h",
+    "estimated_unlock_time",
+)
+
+
+def _energy_needed_kwh(batteries: list, target_soc: float) -> float:
+    """Return the kWh still missing to reach ``target_soc`` across ``batteries``."""
+    return sum(
+        (target_soc - c.data.get("battery_soc", 100)) / 100.0 * c.data.get("battery_total_energy", 0)
+        for c in batteries if c.data
+    )
+
+
+def _charge_time_h(
+    ctrl,
+    batteries: list,
+    target_soc: float,
+    energy_needed_kwh: float,
+    system_kw: float,
+) -> float:
+    """Hours of charging before the LAST battery reaches ``target_soc``.
+
+    Each battery's kWh have to pass through its own inverter at its own limit,
+    so the fleet is done when its slowest member is done -- not when a combined
+    deficit has crossed a combined power limit, which on a mixed fleet reads
+    hours short. The combined figure still binds when a global system limit
+    caps the sum below what the batteries could take individually.
+    """
+    slowest = 0.0
+    for coordinator in batteries:
+        if not coordinator.data:
+            continue
+        deficit = (
+            (target_soc - coordinator.data.get("battery_soc", 100))
+            / 100.0
+            * coordinator.data.get("battery_total_energy", 0)
+        )
+        if deficit <= 0:
+            continue
+        limit_w = ctrl._battery_power_limit(coordinator, True)
+        if limit_w <= 0:
+            continue
+        slowest = max(
+            slowest,
+            deficit / (limit_w / 1000.0 * CHARGE_EFFICIENCY),
+        )
+
+    return max(slowest, energy_needed_kwh / (system_kw * CHARGE_EFFICIENCY))
 
 
 class ChargeDelayManager:
@@ -218,9 +281,11 @@ class ChargeDelayManager:
             await self._save_state()
 
     def handle_daily_reset_and_eval(self) -> None:
-        """Reset the delay latch on a new day, then evaluate to keep the sensor live.
+        """Reset the delay latch on a new day and detect the solar start.
 
-        Runs once per control cycle; no-op when the feature is disabled.
+        Runs once per control cycle; no-op when the feature is disabled. The
+        delay itself is evaluated by ``_refresh_operation_blockers``, which the
+        cycle calls right after this, so it is not repeated here.
         """
         ctrl = self._controller
         if not ctrl.charge_delay_enabled:
@@ -234,7 +299,6 @@ class ChargeDelayManager:
                 ctrl._delay_setpoint_reached = False
                 ctrl._solar_t_start = None
                 ctrl._forecast_unavailable_since = None
-                ctrl._forecast_zero_since = None
             # On first cycle after HA restart (_charge_delay_last_date is None),
             # _charge_delay_unlocked may have been restored from storage by
             # _weekly_charge_mgr.load_state() — preserve it rather than wiping it.
@@ -258,8 +322,6 @@ class ChargeDelayManager:
 
         # Detect solar production start (shared with weekly charge)
         ctrl._consumption_tracker.detect_solar_t_start()
-        # Proactively evaluate delay to keep ChargeDelaySensor populated
-        self.is_charge_delayed()
 
     def is_charge_delayed(self) -> bool:
         """Unified gate: check if charging should be delayed based on solar forecast.
@@ -469,6 +531,20 @@ class ChargeDelayManager:
         # Update common status fields
         status["solar_t_start"] = _h_to_hhmm(ctrl._solar_t_start)
 
+        # Energy needed to reach target_soc.  Plain SOC arithmetic, independent of
+        # the forecast and of T_start, so publish it here: every hold below returns
+        # without calculating the solar balance, and a consumer that defaults the
+        # missing attribute to 0 would read the hold as "nothing to charge".
+        # Clamped for the sensor so a battery above target reports no deficit
+        # rather than a negative one; the raw value still drives the unlock below.
+        energy_needed_kwh = _energy_needed_kwh(automatic_batteries, target_soc)
+        status["energy_needed_kwh"] = round(max(0.0, energy_needed_kwh), 2)
+        # The solar balance below may not be reached this cycle.  Drop what it
+        # would have produced rather than leaving a previous cycle's figures
+        # beside the fresh deficit; each is rewritten as soon as it is computed.
+        for key in _BALANCE_STATUS_FIELDS:
+            status[key] = None
+
         # --- Exception 1: No solar forecast sensor or unavailable ---
         if not (
             get_configured_solar_forecast_sensor(ctrl, "remaining")
@@ -493,7 +569,6 @@ class ChargeDelayManager:
         )
 
         if raw_forecast is None:
-            ctrl._forecast_zero_since = None
             mono = monotonic()
             if ctrl._forecast_unavailable_since is None:
                 ctrl._forecast_unavailable_since = mono
@@ -519,30 +594,19 @@ class ChargeDelayManager:
             "today" if forecast.original_source == "today_legacy"
             else forecast.original_source
         )
-        # The scalar may briefly roll to zero at local midnight before the
-        # provider publishes the new day's budget.  Dated periods are already
-        # reconciled by read_remaining_solar_kwh; for a scalar-only zero, hold
-        # through the same bounded grace used for unavailable values.  This is
-        # deliberately not a permanent unlock, so a later valid update re-arms
-        # the delay instead of leaving it open for the day.
-        if raw_forecast <= 1e-9:
-            zero_since = getattr(ctrl, "_forecast_zero_since", None)
-            if zero_since is None and now_h < 1.0:
-                zero_since = monotonic()
-                ctrl._forecast_zero_since = zero_since
-            if (
-                zero_since is not None
-                and monotonic() - zero_since < ctrl._forecast_grace_s
-            ):
-                status["forecast_kwh"] = raw_forecast
-                status["solar_forecast_source"] = forecast_origin
-                status["solar_forecast_diagnostic_source"] = forecast.source
-                status["solar_forecast_conversion"] = forecast.conversion
-                status["unlock_reason"] = None
-                status["state"] = "Waiting for forecast"
-                return True
-        else:
-            ctrl._forecast_zero_since = None
+        # The scalar rolls to zero at local midnight until the provider
+        # publishes the new day's budget, which can take until ~00:30 (#457).
+        # Dated periods are already reconciled by read_remaining_solar_kwh; a
+        # scalar-only zero is held until there could plausibly be sun. A five
+        # minute wall-clock grace was far too short for real providers.
+        if raw_forecast <= 1e-9 and now_h < _PROVISIONAL_ZERO_HOLD_HOUR:
+            status["forecast_kwh"] = raw_forecast
+            status["solar_forecast_source"] = forecast_origin
+            status["solar_forecast_diagnostic_source"] = forecast.source
+            status["solar_forecast_conversion"] = forecast.conversion
+            status["unlock_reason"] = None
+            status["state"] = "Waiting for forecast"
+            return True
 
         # read_remaining_solar_kwh normalizes both configured sources to the
         # same future horizon, so downstream consumers must never subtract
@@ -637,7 +701,13 @@ class ChargeDelayManager:
             # is due, so the unavoidable grid charge lands in the cheap window (#4).
             if self._low_forecast_price_release(now_h):
                 return True
-            return _unlock("low_forecast")
+            # A zero forecast is as likely to be a provider that has not
+            # published yet as a genuinely sunless day, so unlock with a
+            # re-evaluable reason: the cheap night hours stay usable, and the
+            # delay re-arms by itself once the real budget lands (#457).
+            return _unlock(
+                "zero_forecast" if raw_forecast <= 1e-9 else "low_forecast"
+            )
 
         # --- Exception 3: No T_start detected ---
         if ctrl._solar_t_start is None:
@@ -666,12 +736,6 @@ class ChargeDelayManager:
                 return _unlock("past_t_end")
 
         # --- Calculate energy balance ---
-        # Energy needed to reach target_soc
-        energy_needed_kwh = sum(
-            (target_soc - c.data.get("battery_soc", 100)) / 100.0 * c.data.get("battery_total_energy", 0)
-            for c in automatic_batteries if c.data
-        )
-
         if energy_needed_kwh <= 0:
             return _unlock("batteries_full")
 
@@ -682,7 +746,10 @@ class ChargeDelayManager:
         ) / 1000.0
         if max_charge_power_kw <= 0:
             return _unlock("no_charge_power")
-        charge_time_h = energy_needed_kwh / (max_charge_power_kw * CHARGE_EFFICIENCY)
+        charge_time_h = _charge_time_h(
+            ctrl, automatic_batteries, target_soc, energy_needed_kwh,
+            max_charge_power_kw,
+        )
 
         # Remaining solar and consumption
         if forecast_is_remaining:

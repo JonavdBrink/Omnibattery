@@ -6,6 +6,7 @@ a Marstek Venus battery system asynchronously.
 
 from pymodbus.client import AsyncModbusTcpClient, AsyncModbusSerialClient
 from pymodbus.exceptions import ConnectionException, ModbusIOException
+from pymodbus.pdu import ExceptionResponse
 import asyncio
 import inspect
 import time
@@ -24,6 +25,27 @@ _LOGGER = logging.getLogger(__name__)
 # retries minted a new tid per attempt, which guaranteed every flushed reply
 # was discarded with a "transaction_id mismatch, Skipping" error.
 _PYMODBUS_RETRIES = 2
+
+
+class _BlockRefused:
+    """Sentinel: the device answered a block read with a Modbus exception.
+
+    Distinct from ``None`` (timeout / connection loss / incomplete frame) so a
+    caller can tell "this span covers an address the firmware does not
+    implement — read its members one at a time and stop block-reading it" from
+    "the link is down, do not fire N doomed requests" (issue #501).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "BLOCK_REFUSED"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+BLOCK_REFUSED = _BlockRefused()
 
 
 def _backoff_jitter(delay: float) -> float:
@@ -51,6 +73,15 @@ def _marstek_v3_packet_correction(sending: bool, data: bytes) -> bytes:
     if not sending and len(data) == 9 and data[5] == 4 and (data[7] & 0x80) == 0x80:
         return data[0:5] + b'\x03' + data[6:]
     return data
+
+
+_TRACE_PACKET_SUPPORTED = "trace_packet" in inspect.signature(AsyncModbusTcpClient.__init__).parameters
+"""Whether this pymodbus takes the receive hook the v3 correction needs.
+
+Added in pymodbus 3.8, which the manifest already requires; the check keeps an
+older one from failing to build a client at all, at the price of a v3 that
+waits out its rejections.
+"""
 
 
 def _detect_slave_kwarg(client) -> str:
@@ -166,12 +197,10 @@ class MarstekModbusClient:
         # implemented), so we enforce the spacing ourselves after every request.
         self._message_wait_sec = max(0.0, message_wait_ms / 1000.0)
 
-        self.client = self._make_client()
-
         # v3 packet correction repairs the TCP MBAP length byte; RTU framing has
         # no MBAP header (CRC instead), so it only applies to the TCP transport.
-        if is_v3 and serial_port is None:
-            self.client.trace_packet = _marstek_v3_packet_correction
+        # _make_client installs it, because it can only be given at construction.
+        self.client = self._make_client()
 
         self.unit_id = slave_id  # Modbus slave/unit id for this battery
         self._slave_kwarg = _detect_slave_kwarg(self.client)  # "slave" or "device_id"
@@ -204,6 +233,15 @@ class MarstekModbusClient:
                 timeout=self._timeout,
                 retries=_PYMODBUS_RETRIES,
             )
+        trace: dict = {}
+        if self._is_v3 and _TRACE_PACKET_SUPPORTED:
+            # Constructor argument, not an attribute: pymodbus hands the hook to
+            # its TransactionManager while building it, and assigning
+            # client.trace_packet afterwards only decorates the client object
+            # while the manager keeps its own dummy_trace_packet. That is how
+            # the correction came to be installed on every v3 connection and
+            # called on none of them.
+            trace["trace_packet"] = _marstek_v3_packet_correction
         return AsyncModbusTcpClient(
             host=self._host,
             port=self._port,
@@ -211,6 +249,7 @@ class MarstekModbusClient:
             retries=_PYMODBUS_RETRIES,
             reconnect_delay=0,
             reconnect_delay_max=0,
+            **trace,
         )
 
     def set_shutting_down(self, value: bool) -> None:
@@ -257,12 +296,9 @@ class MarstekModbusClient:
                 if self._is_v3 and self._serial_port is None:
                     await asyncio.sleep(1.0)
 
-            # Create a fresh client instance (no corrupted state, no backoff)
+            # Create a fresh client instance (no corrupted state, no backoff).
+            # It carries the v3 packet correction again; see _make_client.
             self.client = self._make_client()
-
-            # Restore v3 packet correction (TCP transport only — see __init__)
-            if self._is_v3 and self._serial_port is None:
-                self.client.trace_packet = _marstek_v3_packet_correction
 
             connected = await self.client.connect()
 
@@ -318,6 +354,7 @@ class MarstekModbusClient:
         max_retries: int = 1,
         retry_delay: float = 0.1,
         sensor_key: Optional[str] = None,
+        exception_sentinel=None,
     ) -> Optional[list]:
         """Read ``count`` holding registers, returning raw words.
 
@@ -348,8 +385,10 @@ class MarstekModbusClient:
 
         attempt = 0
         current_retry_delay = retry_delay
+        last_was_exception_response = False
 
         while attempt < max_retries:
+            last_was_exception_response = False
             # Skip connection check - let pymodbus handle connection issues
             # This avoids problems with incorrect connection state reporting
 
@@ -365,11 +404,14 @@ class MarstekModbusClient:
                     if self._message_wait_sec and not self._is_shutting_down:
                         await asyncio.sleep(self._message_wait_sec)
                 if result.isError():
+                    last_was_exception_response = isinstance(result, ExceptionResponse)
                     if not self._is_shutting_down:
                         _LOGGER.error(
-                            "Modbus read error at register %d (0x%04X) on attempt %d",
+                            "Modbus read error at register %d (0x%04X), span length %d, exception code %s on attempt %d",
                             register,
                             register,
+                            count,
+                            getattr(result, "exception_code", "unavailable"),
                             attempt + 1,
                         )
                 elif not hasattr(result, "registers") or result.registers is None or len(result.registers) < count:
@@ -426,6 +468,8 @@ class MarstekModbusClient:
             register,
             max_retries,
         )
+        if last_was_exception_response and exception_sentinel is not None:
+            return exception_sentinel
         return None
 
     async def async_read_register(
@@ -477,8 +521,9 @@ class MarstekModbusClient:
     ) -> Optional[list]:
         """Read a contiguous span of holding registers in a single request.
 
-        Returns the raw list of register words (length ``count``) or None on
-        failure. Callers slice the buffer per field and decode each with
+        Returns the raw list of register words (length ``count``),
+        ``BLOCK_REFUSED`` for a Modbus exception response, or None for other
+        failures. Callers slice the buffer per field and decode each with
         :func:`decode_registers`. Used to cut request count on the weak v3 MCU
         (issue #361).
         """
@@ -488,6 +533,7 @@ class MarstekModbusClient:
             max_retries=max_retries,
             retry_delay=retry_delay,
             sensor_key=block_key,
+            exception_sentinel=BLOCK_REFUSED,
         )
 
     async def async_write_register(self, register: int, value: int, max_retries: int = 1, retry_delay: float = 0.1) -> bool:

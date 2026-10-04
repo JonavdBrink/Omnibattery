@@ -64,3 +64,4 @@ bash.exe.stackdump
 .agents/
 .codex/
 resumen-2026-08-25.md
+.claude/settings.json

@@ -124,6 +124,100 @@ def test_later_solar_does_not_erase_early_deadline():
     assert deadlines[-1].deadline <= intervals[1].end
 
 
+def test_small_battery_exposes_deficit_after_solar_fills_it():
+    intervals = [
+        _interval(0, 0.5),
+        _interval(1, 0.0, 2.0),
+        _interval(2, 1.5),
+    ]
+
+    unbounded = build_energy_deadlines(intervals, usable_initial_kwh=0.0)
+    bounded = build_energy_deadlines(
+        intervals,
+        usable_initial_kwh=0.0,
+        usable_capacity_kwh=1.0,
+    )
+    simulation = simulate_allocations(
+        intervals,
+        usable_initial_kwh=0.0,
+        usable_capacity_kwh=1.0,
+    )
+
+    assert unbounded[-1].deadline == intervals[0].end
+    assert bounded[-1].deadline == intervals[-1].end
+    assert bounded[-1].required_cumulative_kwh == pytest.approx(0.5)
+    assert simulation.trajectory[1][1] == pytest.approx(1.0)
+    assert simulation.final_projected_energy_kwh == pytest.approx(-0.5)
+
+
+def test_slot_before_projected_full_is_not_allocated_to_later_deadline():
+    intervals = [
+        _interval(0, 0.0, 2.0),
+        _interval(1, 1.5),
+    ]
+    deadlines = build_energy_deadlines(
+        intervals,
+        usable_initial_kwh=0.0,
+        usable_capacity_kwh=1.0,
+    )
+    before_full = _slot(0, 15, 0.01)
+    after_full = _slot(15, 30, 0.20)
+
+    plan = allocate_price_slots(
+        intervals,
+        deadlines,
+        [before_full, after_full],
+        total_required_kwh=0.5,
+        effective_power_kw=2.0,
+        charge_efficiency=1.0,
+        now=BASE,
+        horizon_end=BASE + timedelta(hours=1),
+        headroom_kwh=1.0,
+    )
+
+    assert [allocation.slot for allocation in plan.allocations] == [after_full]
+    assert plan.allocated_kwh == pytest.approx(0.5)
+
+
+def test_capacity_bound_does_not_change_plan_when_battery_never_fills():
+    intervals = [
+        _interval(0, 0.4, 0.1),
+        _interval(1, 1.0),
+    ]
+    unbounded_deadlines = build_energy_deadlines(intervals, usable_initial_kwh=1.0)
+    bounded_deadlines = build_energy_deadlines(
+        intervals,
+        usable_initial_kwh=1.0,
+        usable_capacity_kwh=3.0,
+    )
+    slots = [_slot(0, 15, 0.1), _slot(15, 30, 0.2)]
+    arguments = {
+        "total_required_kwh": 0.3,
+        "effective_power_kw": 2.0,
+        "charge_efficiency": 1.0,
+        "usable_initial_kwh": 1.0,
+        "now": BASE,
+        "horizon_end": BASE + timedelta(hours=1),
+    }
+
+    current_plan = allocate_price_slots(
+        intervals,
+        unbounded_deadlines,
+        slots,
+        **arguments,
+    )
+    bounded_plan = allocate_price_slots(
+        intervals,
+        bounded_deadlines,
+        slots,
+        headroom_kwh=2.0,
+        **arguments,
+    )
+
+    assert bounded_deadlines == unbounded_deadlines
+    assert bounded_plan == current_plan
+
+
 def test_reference_pattern_reserves_early_energy_and_keeps_rest_flexible():
     intervals = [_interval(i, 0.1) for i in range(96)]
     # 1.30 kWh has been consumed beyond usable storage by 03:30.
@@ -268,6 +362,40 @@ def test_time_slot_windows_are_materialized_and_split_at_midnight():
         (22, 0),
     ]
     assert slots[-1].end.date() == BASE.date() + timedelta(days=1)
+
+
+def test_time_slot_windows_parse_the_stored_hh_mm_ss_format():
+    """HA's TimeSelector stores "HH:MM:SS" (#447).
+
+    "%H:%M" raised on every configured window, so Time Slot mode produced no
+    candidate slots and never got a chronological plan — including the
+    guaranteed-minimum-SOC floor deadlines.
+    """
+    now = BASE + timedelta(minutes=30)
+    controller = SimpleNamespace(
+        charging_time_slots=[
+            {
+                "start_time": "01:00:00",
+                "end_time": "05:00:00",
+                "days": ["tue"],
+            }
+        ]
+    )
+
+    slots = PricingManager(SimpleNamespace(), controller)._time_slot_price_slots(now)
+
+    assert [(slot.start.hour, slot.end.hour) for slot in slots] == [(1, 5)]
+
+
+def test_no_discharge_window_parses_the_stored_hh_mm_ss_format():
+    """Same "%H:%M" parse bug on the no-discharge windows (#447)."""
+    manager = PricingManager(SimpleNamespace(), SimpleNamespace())
+    blocked = _slot(60, 120, 0.0)
+    allowed = _slot(600, 660, 0.0)
+    window = {"start_time": "01:00:00", "end_time": "02:00:00", "days": ["tue"]}
+
+    assert manager._future_slot_matches_operation_block(blocked, window) is True
+    assert manager._future_slot_matches_operation_block(allowed, window) is False
 
 
 def test_time_slot_dashboard_preview_extends_known_windows_but_control_does_not():

@@ -89,6 +89,7 @@ def _controller(**overrides):
         _solar_t_start=8.0,
         _charge_delay_last_date=None,
         _effective_system_capacity=lambda coords, is_charging: 3000.0,
+        _battery_power_limit=lambda c, is_charging: 3000.0,
         _weekly_charge_mgr=SimpleNamespace(is_active=lambda: False),
     )
     base["_consumption_tracker"] = overrides.pop("_consumption_tracker", _tracker())
@@ -506,6 +507,100 @@ def test_low_forecast_price_release_uses_fallback_when_no_t_start():
     assert edges == [11]  # T_START_FALLBACK_HOUR
 
 
+def test_waiting_for_solar_publishes_energy_needed(monkeypatch):
+    # Pre-dawn hold: the deficit is SOC arithmetic, so it must be published
+    # even though the solar balance cannot be calculated yet.
+    now = dt_util.now().replace(hour=6, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(charge_delay_module, "_decision_now", lambda: now)
+    ctrl = _controller(
+        _solar_t_start=None,
+        coordinators=[_coord(soc=50, total_energy=5.0)],
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(15.0)})
+
+    assert mgr._should_delay_charge(80) is True
+    assert ctrl._charge_delay_status["state"] == "Waiting for solar"
+    # 30% of a 5 kWh battery.
+    assert ctrl._charge_delay_status["energy_needed_kwh"] == pytest.approx(1.5)
+
+
+def test_waiting_for_solar_energy_needed_never_negative(monkeypatch):
+    # Above target before sunrise: report no deficit rather than a negative one.
+    now = dt_util.now().replace(hour=6, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(charge_delay_module, "_decision_now", lambda: now)
+    ctrl = _controller(
+        _solar_t_start=None,
+        coordinators=[_coord(soc=90, total_energy=5.0)],
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(15.0)})
+
+    assert mgr._should_delay_charge(80) is True
+    assert ctrl._charge_delay_status["energy_needed_kwh"] == 0.0
+
+
+def test_cheap_import_hold_publishes_energy_needed(monkeypatch):
+    # The grid-deficit hold also returns before the solar balance is calculated.
+    now = dt_util.now().replace(hour=4, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(charge_delay_module, "_decision_now", lambda: now)
+    ctrl = _controller(
+        _solar_t_start=None,
+        coordinators=[_coord(soc=50, total_energy=5.0)],
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(1.0)})
+    mgr._low_forecast_price_release = lambda now_h: True
+
+    assert mgr._should_delay_charge(80) is True
+    assert ctrl._charge_delay_balance_needs_charge is True
+    assert ctrl._charge_delay_status["energy_needed_kwh"] == pytest.approx(1.5)
+
+
+def test_hold_clears_balance_figures_from_a_previous_cycle(monkeypatch):
+    # A hold that returns before the balance runs must not leave yesterday's
+    # net solar beside today's deficit.
+    now = dt_util.now().replace(hour=4, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(charge_delay_module, "_decision_now", lambda: now)
+    ctrl = _controller(
+        _solar_t_start=None,
+        coordinators=[_coord(soc=50, total_energy=5.0)],
+        _charge_delay_status={
+            "state": "Idle",
+            "safety_margin_min": 30,
+            "net_solar_kwh": 9.9,
+            "charge_time_h": 3.3,
+        },
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(1.0)})
+    mgr._low_forecast_price_release = lambda now_h: True
+
+    assert mgr._should_delay_charge(80) is True
+    assert ctrl._charge_delay_status["net_solar_kwh"] is None
+    assert ctrl._charge_delay_status["charge_time_h"] is None
+
+
+def test_forecast_unavailable_hold_publishes_energy_needed():
+    # The grace hold returns before the forecast is even read, so the deficit
+    # has to be published above it to reach the sensor.
+    ctrl = _controller(_forecast_unavailable_since=None, _forecast_grace_s=300)
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state("unavailable")})
+
+    assert mgr._should_delay_charge(80) is True
+    assert ctrl._charge_delay_status["state"] == "Waiting for forecast"
+    assert ctrl._charge_delay_status["energy_needed_kwh"] == pytest.approx(1.5)
+
+
+def test_midnight_zero_forecast_hold_publishes_energy_needed(monkeypatch):
+    # The provisional-zero hold (#457) runs just after midnight, before the
+    # balance, and dropped the attribute the same way.
+    now = dt_util.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(charge_delay_module, "_decision_now", lambda: now)
+    ctrl = _controller(solar_forecast_remaining_sensor="sensor.remaining")
+    mgr = _make_mgr(ctrl, states={"sensor.remaining": _state(0)})
+
+    assert mgr._should_delay_charge(80) is True
+    assert ctrl._charge_delay_status["state"] == "Waiting for forecast"
+    assert ctrl._charge_delay_status["energy_needed_kwh"] == pytest.approx(1.5)
+
+
 # ----------------------------------------------------------------------
 # _estimate_energy_balance_unlock_h: projection math
 # ----------------------------------------------------------------------
@@ -569,6 +664,17 @@ def test_daily_reset_first_cycle_preserves_restored_unlock():
     mgr.handle_daily_reset_and_eval()
     assert ctrl._charge_delay_unlocked is True
     assert ctrl._charge_delay_last_date == date.today()
+
+
+def test_daily_reset_leaves_the_evaluation_to_the_blocker_refresh():
+    # _refresh_operation_blockers evaluates the delay right after this in the
+    # same cycle; a second full projection here doubled the cycle's cost (#511).
+    ctrl = _controller(_charge_delay_last_date=date.today())
+    mgr = _make_mgr(ctrl)
+    calls = []
+    mgr._should_delay_charge = lambda target: calls.append(target) or True
+    mgr.handle_daily_reset_and_eval()
+    assert calls == []
 
 
 # ----------------------------------------------------------------------
@@ -894,3 +1000,80 @@ def test_estimate_bare_edge_is_later_than_factored_edge():
     factored = mgr._estimate_energy_balance_unlock_h(10.0, 1.0, 8.0, 16.0, 8.0)
     bare = mgr._estimate_energy_balance_unlock_h(10.0, 1.0, 8.0, 16.0, 8.0, safety_factor=1.0)
     assert bare > factored
+
+
+def test_late_provider_zero_unlocks_without_latching_then_rearms(monkeypatch):
+    """#457: Forecast.Solar publishing at ~00:30 must not disable the delay.
+
+    Past the provisional-zero hold hour the gate unlocks (cheap night hours
+    stay usable) but must keep the unlock re-evaluable, so the real budget
+    re-arms the delay instead of arriving at a latched-open gate.
+    """
+    clock = [dt_util.now().replace(hour=1, minute=15, second=0, microsecond=0)]
+    monkeypatch.setattr(charge_delay_module, "_decision_now", lambda: clock[0])
+    states = {"sensor.forecast": _state(0)}
+    ctrl = _controller()
+    mgr = _make_mgr(ctrl, states=states)
+
+    assert mgr.is_charge_delayed() is False
+    assert ctrl._charge_delay_status["unlock_reason"] == "zero_forecast"
+    assert ctrl._charge_delay_unlocked is False  # not latched for the day
+
+    clock[0] = clock[0].replace(minute=20)
+    states["sensor.forecast"] = _state(43.54)
+    assert mgr.is_charge_delayed() is True
+    assert ctrl._charge_delay_unlocked is False
+
+
+def test_charge_time_is_set_by_the_slowest_battery(monkeypatch):
+    # A slow inverter must determine fleet charging time even when aggregate power is high.
+    _at_hour(monkeypatch, 9)
+    slow = _coord(soc=0, total_energy=17.92)
+    fast = _coord(soc=0, total_energy=13.8)
+    ctrl = _controller(
+        coordinators=[slow, fast],
+        _effective_system_capacity=lambda coords, is_charging: 9500.0,
+        _battery_power_limit=lambda c, is_charging: 2500.0 if c is slow else 7000.0,
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(100.0)})
+
+    mgr._should_delay_charge(100)
+
+    charge_time_h = ctrl._charge_delay_status["charge_time_h"]
+    assert charge_time_h == pytest.approx(8.43, abs=0.05)
+    assert charge_time_h != pytest.approx(3.93, abs=0.05)
+
+
+def test_charge_time_unchanged_on_a_single_battery(monkeypatch):
+    # A single battery keeps the established energy-over-power estimate unchanged.
+    _at_hour(monkeypatch, 9)
+    battery = _coord(soc=0, total_energy=4.25)
+    ctrl = _controller(
+        coordinators=[battery],
+        _effective_system_capacity=lambda coords, is_charging: 2500.0,
+        _battery_power_limit=lambda c, is_charging: 2500.0,
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(100.0)})
+
+    mgr._should_delay_charge(100)
+
+    expected = 4.25 / (2.5 * 0.85)
+    assert ctrl._charge_delay_status["charge_time_h"] == expected
+
+
+def test_charge_time_still_respects_the_system_power_limit(monkeypatch):
+    # A configured fleet power cap must outweigh faster per-battery charge times.
+    _at_hour(monkeypatch, 9)
+    first = _coord(soc=0, total_energy=4.25)
+    second = _coord(soc=0, total_energy=4.25)
+    ctrl = _controller(
+        coordinators=[first, second],
+        _effective_system_capacity=lambda coords, is_charging: 2000.0,
+        _battery_power_limit=lambda c, is_charging: 5000.0,
+    )
+    mgr = _make_mgr(ctrl, states={"sensor.forecast": _state(100.0)})
+
+    mgr._should_delay_charge(100)
+
+    expected = 8.5 / (2.0 * 0.85)
+    assert ctrl._charge_delay_status["charge_time_h"] == expected

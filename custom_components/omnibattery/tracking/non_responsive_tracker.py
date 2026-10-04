@@ -10,9 +10,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
+
+# How long a battery has to stay non-delivering, without a single cycle in
+# between where it did deliver, before the condition is raised as a Repair.
+# The log line was the only signal until now, so a battery that never recovered
+# sat dead for a day with nothing a user would ever see (issue #452). Long
+# enough that an ordinary episode - excluded, cooled down, recovered on retry -
+# never raises one.
+NON_DELIVERY_REPAIR_AFTER_S = 30 * 60
 
 
 class NonResponsiveTracker:
@@ -35,6 +44,23 @@ class NonResponsiveTracker:
     def cooldown_min(self) -> int:
         """Flat exclusion cooldown in minutes (read by the diagnostic sensor)."""
         return self._cooldown_min
+
+    def last_reason(self, coordinator, default: str = "") -> str:
+        """Return the reason category recorded for this battery's last fail.
+
+        Charge-side reasons are prefixed ``charge_`` (see ``record_non_delivery``);
+        discharge-side non-delivery and every ``record_comm_failure`` reason
+        (``modbus_write_failed``, ``driver_exception``, ``feedback_timeout``,
+        ``ack_mismatch``, ``comm_failure``) are not. Callers that only want to
+        act on a charge-side exemption (e.g. a BMS full-charge cutoff) must not
+        clear a battery whose last recorded reason isn't one, or a genuine
+        discharge/comms fault on an otherwise-full battery is silently wiped
+        every cycle and never reaches exclusion or a Repair.
+        """
+        info = self.batteries.get(coordinator)
+        if not info:
+            return default
+        return info.get("reason") or default
 
     def is_excluded(self, coordinator) -> bool:
         """Return True if the battery is currently in non-responsive cooldown.
@@ -86,7 +112,15 @@ class NonResponsiveTracker:
         """
         info = self.batteries.setdefault(
             coordinator,
-            {"fail_count": 0, "excluded_at": None, "wake_used": False},
+            {
+                "fail_count": 0,
+                "excluded_at": None,
+                "wake_used": False,
+                # Start of the current unbroken non-delivery spell. Unlike
+                # excluded_at it survives the cooldown expiring and the retry
+                # that fails again, so it measures the fault, not the episode.
+                "degraded_since": None,
+            },
         )
         info["fail_count"] += 1
         info["reason"] = reason
@@ -107,6 +141,8 @@ class NonResponsiveTracker:
                 )
                 return "wake"
             info["excluded_at"] = dt_util.utcnow()
+            if info.get("degraded_since") is None:
+                info["degraded_since"] = info["excluded_at"]
             _LOGGER.warning(
                 "[%s] Non-responsive after %d consecutive cycles (reason=%s, "
                 "retry_attempted=%s) — %s. Excluding from pool for %d minutes.",
@@ -120,15 +156,19 @@ class NonResponsiveTracker:
         self, coordinator, commanded: float, actual: float,
         *, reason: str = "non_delivery", retry_attempted: bool = False,
     ) -> str | None:
-        """Record a cycle where the battery ACK'd but delivered ~0 W.
+        """Record a cycle where the battery took the command but delivered ~0 W.
 
         Returns ``"wake"`` on the grace round (caller should attempt a wake
         nudge and leave the battery in the pool), ``"excluded"`` on the call
         that excludes the battery for real, or ``None`` otherwise.
         """
+        # Not phrased as "ACK ok": a fire-and-forget driver (Hoymiles publishes
+        # the setpoint over MQTT and never reads it back) reaches here from the
+        # poll-time delivery check, with no ACK to report either way.
         return self._record_fail(
             coordinator, reason,
-            f"ACK ok but not delivering power: commanded={int(commanded)}W, actual={int(actual)}W",
+            f"command accepted but power not delivered: "
+            f"commanded={int(commanded)}W, actual={int(actual)}W",
             retry_attempted=retry_attempted,
             allow_wake_grace=True,
         )
@@ -152,11 +192,20 @@ class NonResponsiveTracker:
         if info:
             info["wake_attempted"] = value
 
-    def clear(self, coordinator) -> None:
-        """Mark a battery as healthy (delivering power) and reset its exclusion state."""
+    def clear(self, coordinator, *, delivering: bool = True) -> None:
+        """Reset a battery's exclusion state.
+
+        ``delivering=False`` resets the episode bookkeeping without claiming the
+        battery is healthy - used on a commanded direction flip, which starts a
+        fresh engage grace but proves nothing about delivery. Only a real
+        delivery ends the spell the Repair below is timed from, so a fault that
+        survives every flip is still surfaced.
+        """
         info = self.batteries.get(coordinator)
         if info:
             was_excluded = info["excluded_at"] is not None
+            if delivering:
+                info["degraded_since"] = None
             info["fail_count"] = 0
             info["excluded_at"] = None
             info["reason"] = None
@@ -178,3 +227,41 @@ class NonResponsiveTracker:
             if info.get("excluded_at") is not None
             and (now - info["excluded_at"]).total_seconds() / 60 < self._cooldown_min
         ]
+
+    def update_repairs(self, hass, entry_id: str) -> None:
+        """Raise or resolve a Repair per battery stuck non-delivering.
+
+        Called once per control cycle, like the phase limiter's degraded-sensor
+        warning, so create and delete both happen in one idempotent place.
+        """
+        now = dt_util.utcnow()
+        for coordinator, info in self.batteries.items():
+            since = info.get("degraded_since")
+            stuck = (
+                since is not None
+                and (now - since).total_seconds() >= NON_DELIVERY_REPAIR_AFTER_S
+            )
+            if stuck == bool(info.get("repair_raised")):
+                continue
+            device_key = getattr(coordinator, "device_key", None) or coordinator.name
+            issue_id = f"battery_not_delivering_{entry_id}_{device_key}"
+            if stuck:
+                ir.async_create_issue(
+                    hass,
+                    "omnibattery",
+                    issue_id,
+                    is_fixable=False,
+                    is_persistent=True,
+                    issue_domain="omnibattery",
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="battery_not_delivering",
+                    translation_placeholders={
+                        "battery": coordinator.name,
+                        "minutes": f"{(now - since).total_seconds() / 60:.0f}",
+                        "reason": str(info.get("reason") or "non_delivery"),
+                        "cooldown": str(self._cooldown_min),
+                    },
+                )
+            else:
+                ir.async_delete_issue(hass, "omnibattery", issue_id)
+            info["repair_raised"] = stuck

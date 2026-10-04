@@ -1018,21 +1018,36 @@ class SolarProfileTracker:
         if len(complete) < minimum_days:
             return False
         recent_totals = self._recent_totals(complete)
-        clear: list[tuple[date, float]] = []
+        clear_days: list[SolarProfileDay] = []
         for day in sorted(complete, key=lambda item: item.local_date):
             valid, quality, _reason = _day_quality(day, recent_totals)
             peak = self._robust_day_peak(day)
             if valid and quality >= 0.75 and peak is not None and peak > 0.0:
-                clear.append((day.local_date, peak))
-        if len(clear) < minimum_days:
+                clear_days.append(day)
+        if len(clear_days) < minimum_days:
             return False
+        # The quality gate accepts an overcast day the forecast saw coming, so
+        # comparing raw peaks reads a run of grey days as lost capacity.  When
+        # every compared day has a forecast, score each one against its own
+        # forecast instead: the weather cancels out and only a real change in
+        # what the installation delivers moves the ratio.
+        by_forecast = all(
+            day.forecast_reference_kwh for day in clear_days[-minimum_days:]
+        )
+
+        def _capacity_metric(day: SolarProfileDay) -> float | None:
+            if not by_forecast:
+                return self._robust_day_peak(day)
+            if not day.forecast_reference_kwh:
+                return None
+            return day.total_energy_kwh / day.forecast_reference_kwh
+
+        clear = [(day.local_date, _capacity_metric(day)) for day in clear_days]
         recent = clear[-SOLAR_CAPACITY_RECENT_CLEAR_DAYS:]
         baseline_end = len(clear) - SOLAR_CAPACITY_RECENT_CLEAR_DAYS
         baseline = clear[
             max(0, baseline_end - SOLAR_CAPACITY_BASELINE_CLEAR_DAYS):baseline_end
         ]
-        if len(baseline) < SOLAR_CAPACITY_BASELINE_CLEAR_DAYS:
-            return False
         baseline_peak = _median([peak for _day, peak in baseline])
         recent_peak = _median([peak for _day, peak in recent])
         if baseline_peak <= 0.0:
@@ -1050,7 +1065,10 @@ class SolarProfileTracker:
         # straddle the change, while the days after it describe the new regime.
         carried = list(recent)
         for entry in reversed(clear[:baseline_end]):
-            if abs(entry[1] / recent_peak - 1.0) > SOLAR_CAPACITY_SHIFT_THRESHOLD:
+            if (
+                entry[1] is None
+                or abs(entry[1] / recent_peak - 1.0) > SOLAR_CAPACITY_SHIFT_THRESHOLD
+            ):
                 break
             carried.insert(0, entry)
         carried_dates = {local_date for local_date, _peak in carried}
@@ -1069,8 +1087,9 @@ class SolarProfileTracker:
         self._last_error = "capacity_regime_changed"
         self.request_save()
         _LOGGER.info(
-            "Solar profile: capacity regime changed %.1f%% (%.3f -> %.3f kW); generation=%d",
+            "Solar profile: capacity regime changed %.1f%% (%s %.3f -> %.3f); generation=%d",
             shift * 100.0,
+            "energy/forecast" if by_forecast else "peak kW",
             baseline_peak,
             recent_peak,
             new_generation,

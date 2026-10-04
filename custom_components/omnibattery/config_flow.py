@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import functools
+import inspect
 import logging
 import math
 from typing import Any
@@ -35,6 +38,7 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    Selector,
 )
 
 from .infra.mac_tracking import (
@@ -92,9 +96,11 @@ from .const import (
     CONF_DELAY_SOC_SETPOINT_ENABLED,
     CONF_BATTERY_VERSION,
     CONF_DC_PV_CONNECTED,
+    CONF_PRIMARY_BATTERY,
     CONF_SLAVE_ID,
     DEFAULT_SLAVE_ID,
     CONF_SERIAL_PORT,
+    CONF_RS485_GATEWAY,
     DEFAULT_VERSION,
     MAX_POWER_BY_VERSION,
     max_power_for_battery_version,
@@ -105,28 +111,11 @@ from .const import (
     CONF_PREDICTIVE_CHARGING_MODE,
     CONF_PRICE_SENSOR,
     CONF_PRICE_INTEGRATION_TYPE,
-    CONF_MAX_PRICE_THRESHOLD,
-    CONF_DISCHARGE_PRICE_THRESHOLD,
-    CONF_SMART_PREDISCHARGE_ENABLED,
-    CONF_NEGATIVE_INJECTION_THRESHOLD,
-    CONF_PREDISCHARGE_RESERVE_SOC,
-    CONF_PREDISCHARGE_MAX_EXPORT_POWER_W,
-    CONF_PREDISCHARGE_EXPORT_MODE,
-    PREDISCHARGE_EXPORT_MODE_SELF_CONSUMPTION,
-    PREDISCHARGE_EXPORT_MODE_AUTOMATIC,
-    PREDISCHARGE_EXPORT_MODE_CUSTOM,
-    PREDISCHARGE_EXPORT_MODES,
-    DEFAULT_PREDISCHARGE_EXPORT_MODE,
-    normalize_predischarge_export_settings,
-    DEFAULT_SMART_PREDISCHARGE_ENABLED,
-    DEFAULT_NEGATIVE_INJECTION_THRESHOLD,
-    DEFAULT_PREDISCHARGE_RESERVE_SOC,
-    DEFAULT_PREDISCHARGE_MAX_EXPORT_POWER_W,
-    CONF_NEGATIVE_PRICE_CHARGING_ENABLED,
-    DEFAULT_NEGATIVE_PRICE_CHARGING_ENABLED,
+    CONF_EXPORT_PRICE_SENSOR,
+    CONF_EXPORT_PRICE_INTEGRATION_TYPE,
+    CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
     CONF_AVERAGE_PRICE_SENSOR,
-    CONF_DP_PRICE_DISCHARGE_CONTROL,
-    CONF_RT_PRICE_DISCHARGE_CONTROL,
     PREDICTIVE_MODE_TIME_SLOT,
     PREDICTIVE_MODE_DYNAMIC_PRICING,
     PREDICTIVE_MODE_REALTIME_PRICE,
@@ -136,11 +125,8 @@ from .const import (
     PRICE_INTEGRATION_EPEX,
     PRICE_INTEGRATION_ENTSOE,
     PRICE_INTEGRATION_TIBBER,
+    PRICE_INTEGRATION_ZONNEPLAN,
     CONF_METER_INVERTED,
-    CONF_PREDICTIVE_SAFETY_MARGIN_KWH,
-    DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH,
-    CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT,
-    DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT,
     CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED,
     DEFAULT_FULL_CHARGE_VOLTAGE_TAPER_ENABLED,
     MIN_CHARGE_HYSTERESIS_PERCENT,
@@ -176,6 +162,7 @@ from .drivers.hoymiles import (
     hoymiles_model_profile,
 )
 from .pricing.nordpool import is_official_nordpool_sensor
+from .pricing.calculations import parse_zonneplan_prices
 
 _ANKER_MAX_POWER_W = 3500
 _SESSY_MAX_CHARGE_POWER_W = 2200
@@ -207,6 +194,121 @@ def _parse_optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(str(value).replace(",", "."))
+
+
+def _price_integration_options() -> list[str]:
+    """Return the supported price providers, in display order."""
+    return [
+        PRICE_INTEGRATION_NORDPOOL,
+        PRICE_INTEGRATION_PVPC,
+        PRICE_INTEGRATION_CKW,
+        PRICE_INTEGRATION_EPEX,
+        PRICE_INTEGRATION_ENTSOE,
+        PRICE_INTEGRATION_TIBBER,
+        PRICE_INTEGRATION_ZONNEPLAN,
+    ]
+
+
+def _price_integration_export_options() -> list[str]:
+    """Return the providers usable for the export curve.
+
+    Tibber is absent: it is service-based and its cache is keyed on the import
+    sensor, so it cannot supply a second, independent curve.
+    """
+    return [
+        option
+        for option in _price_integration_options()
+        if option != PRICE_INTEGRATION_TIBBER
+    ]
+
+
+def _price_integration_type_selector(options: list[str] | None = None) -> SelectSelector:
+    """Return the provider dropdown shared by the import and export curves."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=options if options is not None else _price_integration_options(),
+            translation_key="price_integration_type",
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _validate_price_sensor(
+    hass: HomeAssistant,
+    price_sensor: str,
+    integration_type: str,
+    *,
+    allow_service_cache: bool = True,
+) -> str | None:
+    """Return an error key when the sensor lacks the provider's price data.
+
+    Shared by the import and export curves, which use the same parsers.
+    ``allow_service_cache`` accepts an official Nord Pool sensor that carries no
+    ``raw_today`` because the import path reads it through the Nord Pool
+    service. Only the import curve has that cache, so the export curve requires
+    real attributes.
+    """
+    price_state = hass.states.get(price_sensor)
+    if price_state is None:
+        return "sensor_not_found"
+    attrs = price_state.attributes
+    if integration_type == PRICE_INTEGRATION_PVPC:
+        if not any(f"price_{h:02d}h" in attrs for h in range(24)):
+            return "no_price_data"
+        return None
+    if integration_type == PRICE_INTEGRATION_CKW:
+        prices = attrs.get("prices")
+        if not prices or not isinstance(prices, (list, tuple)):
+            return "no_price_data"
+        return None
+    if integration_type == PRICE_INTEGRATION_EPEX:
+        data = attrs.get("data")
+        if not data or not isinstance(data, (list, tuple)):
+            return "no_price_data"
+        return None
+    if integration_type == PRICE_INTEGRATION_ENTSOE:
+        prices = attrs.get("prices_today")
+        if not prices or not isinstance(prices, (list, tuple)):
+            return "no_price_data"
+        return None
+    if integration_type == PRICE_INTEGRATION_ZONNEPLAN:
+        return None if parse_zonneplan_prices(attrs) else "no_price_data"
+    # Nordpool
+    if "raw_today" in attrs:
+        return None
+    if allow_service_cache and is_official_nordpool_sensor(hass, price_sensor, attrs):
+        return None
+    return "no_price_data"
+
+
+def _validate_export_price_input(
+    hass: HomeAssistant, user_input: dict[str, Any], import_integration_type: str
+) -> dict[str, str]:
+    """Validate the optional export/feed-in price sensor.
+
+    Tibber is rejected here on purpose: its slots come from a service poll whose
+    cache is keyed on the import sensor, so it cannot serve a second curve.
+    """
+    errors: dict[str, str] = {}
+    export_sensor = user_input.get(CONF_EXPORT_PRICE_SENSOR)
+    export_type = user_input.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+    if not export_sensor:
+        return errors
+    if export_type == PRICE_INTEGRATION_TIBBER:
+        errors[CONF_EXPORT_PRICE_INTEGRATION_TYPE] = "export_tibber_unsupported"
+        return errors
+    effective_type = export_type or import_integration_type
+    if effective_type == PRICE_INTEGRATION_TIBBER:
+        # The import curve is service-based, so an export sensor must say which
+        # attribute layout it uses rather than inheriting an unusable type.
+        errors[CONF_EXPORT_PRICE_INTEGRATION_TYPE] = "export_type_required"
+        return errors
+    error = _validate_price_sensor(
+        hass, export_sensor, effective_type, allow_service_cache=False
+    )
+    if error:
+        errors[CONF_EXPORT_PRICE_SENSOR] = error
+    return errors
 
 
 def _validate_offgrid_power_sensor(
@@ -243,63 +345,64 @@ def _validate_solar_production_sensor(
     return {}
 
 
-def _predischarge_export_defaults(
-    config: dict[str, Any],
-    *,
-    default_mode: str = DEFAULT_PREDISCHARGE_EXPORT_MODE,
-) -> tuple[str, float]:
-    """Return selector defaults, inferring the mode for legacy entries."""
-    stored_mode = config.get(CONF_PREDISCHARGE_EXPORT_MODE)
-    stored_power = config.get(
-        CONF_PREDISCHARGE_MAX_EXPORT_POWER_W,
-        DEFAULT_PREDISCHARGE_MAX_EXPORT_POWER_W,
+def _restore_unrenderable_sensors(
+    hass: HomeAssistant, user_input: dict[str, Any], stored: dict[str, Any]
+) -> dict[str, Any]:
+    """Re-add optional sensors the entity picker could not render (#419).
+
+    Home Assistant's ``ha-form`` drops a cleared field from ``user_input``, so an
+    untouched field and a deliberately cleared one arrive here identically. The
+    one case that stays distinguishable: the stored entity is missing from the
+    state machine, which is exactly when ``ha-entity-picker`` shows an empty box
+    and commits that emptiness on close. An empty submission is then not a user
+    decision, so the stored value survives. Clearing a sensor whose entity does
+    exist keeps working, and a preserved dead reference is surfaced by the
+    ``configured_sensor_missing`` Repairs issue.
+    """
+    restored = dict(user_input)
+    for key in (
+        CONF_SOLAR_FORECAST_SENSOR,
+        CONF_SOLAR_FORECAST_REMAINING_SENSOR,
+        CONF_SOLAR_PRODUCTION_SENSOR,
+        CONF_OFFGRID_POWER_SENSOR,
+    ):
+        current = stored.get(key)
+        if restored.get(key) or not current:
+            continue
+        if hass.states.get(current) is None:
+            _LOGGER.warning(
+                "Options flow submitted %s empty while %s does not exist - keeping "
+                "the stored sensor instead of clearing it",
+                key, current,
+            )
+            restored[key] = current
+    return restored
+
+
+def _has_global_forecast_sensor(config) -> bool:
+    """True when the sensors step already picked a solar forecast sensor."""
+    return bool(
+        config.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
+        or config.get(CONF_SOLAR_FORECAST_SENSOR)
     )
-    if stored_mode is None and CONF_PREDISCHARGE_MAX_EXPORT_POWER_W not in config:
-        stored_mode = default_mode
-    return normalize_predischarge_export_settings(stored_mode, stored_power)
 
 
-def _predischarge_export_from_input(
-    user_input: dict[str, Any],
-    *,
-    fallback_mode: str,
-    fallback_power: float = 0.0,
-) -> tuple[str, float]:
-    """Normalize submitted selector data while accepting legacy test/API data."""
-    mode = user_input.get(CONF_PREDISCHARGE_EXPORT_MODE)
-    if mode is None and CONF_PREDISCHARGE_MAX_EXPORT_POWER_W not in user_input:
-        mode = fallback_mode
-    return normalize_predischarge_export_settings(
-        mode,
-        user_input.get(CONF_PREDISCHARGE_MAX_EXPORT_POWER_W, fallback_power),
-    )
+def _resolve_forecast_sensor(hass, config, user_input, errors) -> str | None:
+    """Resolve the per-mode solar forecast sensor, validating a supplied one.
 
-
-def _predischarge_export_mode_selector(default: str):
-    """Build the three-way deliberate-export selector."""
-    return vol.Required(CONF_PREDISCHARGE_EXPORT_MODE, default=default), SelectSelector(
-        SelectSelectorConfig(
-            options=list(PREDISCHARGE_EXPORT_MODES),
-            translation_key="predischarge_export_mode",
-            mode=SelectSelectorMode.LIST,
-        )
-    )
-
-
-def _predischarge_export_limit_selector(default: float):
-    """Build the custom deliberate-export limit field."""
-    return vol.Required(
-        CONF_PREDISCHARGE_MAX_EXPORT_POWER_W,
-        default=default,
-    ), NumberSelector(
-        NumberSelectorConfig(
-            min=0,
-            max=10000,
-            step=50,
-            unit_of_measurement="W",
-            mode=NumberSelectorMode.BOX,
-        )
-    )
+    A sensor picked in the global sensors step wins and the per-mode field is
+    not even shown; otherwise the optional field must carry a kWh/Wh unit.
+    """
+    if _has_global_forecast_sensor(config):
+        return config.get(CONF_SOLAR_FORECAST_SENSOR)
+    sensor = user_input.get("solar_forecast_sensor")
+    if sensor:
+        state = hass.states.get(sensor)
+        if state is None:
+            errors["solar_forecast_sensor"] = "sensor_not_found"
+        elif state.attributes.get("unit_of_measurement", "") not in ("kWh", "Wh"):
+            errors["solar_forecast_sensor"] = "invalid_unit"
+    return sensor
 
 
 def _phase_sensor_schema_field(key: str, default: str | None = None):
@@ -1158,10 +1261,90 @@ def _apply_mac_tracking(user_input: dict, merged: dict) -> None:
     merged[CONF_MAC] = (normalise_mac(user_input.get(CONF_MAC)) or "") if enabled else ""
 
 
+def _restore_submitted_values(data_schema: vol.Schema, user_input: dict[str, Any]) -> vol.Schema:
+    """Return a form schema that prefills the values submitted with an error."""
+    if not isinstance(data_schema.schema, dict):
+        return data_schema
+
+    schema: dict = {}
+    for marker, validator in data_schema.schema.items():
+        if (
+            not isinstance(marker, vol.Marker)
+            or not isinstance(marker.schema, str)
+            or marker.schema not in user_input
+        ):
+            schema[marker] = validator
+            continue
+
+        value = user_input[marker.schema]
+        restored_marker = copy.copy(marker)
+        if isinstance(validator, Selector):
+            description = (
+                dict(marker.description)
+                if isinstance(marker.description, dict)
+                else {}
+            )
+            description["suggested_value"] = value
+            restored_marker.description = description
+        if not (
+            isinstance(validator, (EntitySelector, DeviceSelector))
+            and isinstance(marker, vol.Optional)
+        ):
+            restored_marker.default = lambda value=value: value
+        schema[restored_marker] = validator
+
+    return vol.Schema(schema, required=data_schema.required, extra=data_schema.extra)
+
+
+def _preserve_values_in_error_forms(flow_class):
+    """Wrap flow steps so validation errors do not discard their submitted values."""
+    for name, method in inspect.getmembers(flow_class, inspect.iscoroutinefunction):
+        # Read parameter names from the code object, not inspect.signature():
+        # on Python 3.14 that evaluates annotations, and inherited HA steps
+        # annotate with TYPE_CHECKING-only names (BluetoothServiceInfoBleak).
+        code = method.__code__
+        params = code.co_varnames[: code.co_argcount]
+        if (
+            not name.startswith("async_step_")
+            or "user_input" not in params
+            or getattr(method, "_preserves_submitted_values", False)
+        ):
+            continue
+
+        # Position of user_input among the args passed after self.
+        position = params.index("user_input") - 1
+
+        @functools.wraps(method)
+        async def wrapped(self, *args, __method=method, __position=position, **kwargs):
+            submitted = kwargs.get(
+                "user_input", args[__position] if len(args) > __position else None
+            )
+            result = await __method(self, *args, **kwargs)
+            if (
+                not isinstance(submitted, dict)
+                or not isinstance(result, dict)
+                or result.get("type") != "form"
+                or not result.get("errors")
+            ):
+                return result
+
+            data_schema = result.get("data_schema")
+            if not isinstance(data_schema, vol.Schema):
+                return result
+            updated = dict(result)
+            updated["data_schema"] = _restore_submitted_values(data_schema, submitted)
+            return updated
+
+        wrapped._preserves_submitted_values = True
+        setattr(flow_class, name, wrapped)
+    return flow_class
+
+
+@_preserve_values_in_error_forms
 class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Omnibattery."""
 
-    VERSION = 12
+    VERSION = 16
 
     def __init__(self):
         """Initialize the config flow."""
@@ -1460,6 +1643,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             battery_version = user_input.get(CONF_BATTERY_VERSION, DEFAULT_VERSION)
             slave_id = user_input.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID)
             serial_port = (user_input.get(CONF_SERIAL_PORT) or "").strip()
+            rs485_gateway = bool(user_input.get(CONF_RS485_GATEWAY, False))
             host = (user_input.get(CONF_HOST) or "").strip()
             is_serial = bool(serial_port)
 
@@ -1491,6 +1675,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                         CONF_HOST: host,
                         CONF_PORT: port,
                         CONF_SERIAL_PORT: serial_port,
+                        CONF_RS485_GATEWAY: rs485_gateway,
                         CONF_SLAVE_ID: slave_id,
                         CONF_BATTERY_VERSION: battery_version,
                         "brand": "marstek",
@@ -1506,6 +1691,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     vol.Optional(CONF_HOST): str,
                     vol.Optional(CONF_PORT, default=502): int,
                     vol.Optional(CONF_SERIAL_PORT): str,
+                    vol.Optional(CONF_RS485_GATEWAY, default=False): bool,
                     vol.Required(CONF_SLAVE_ID, default=DEFAULT_SLAVE_ID):
                         vol.All(NumberSelector(NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
                     vol.Required(CONF_BATTERY_VERSION, default=DEFAULT_VERSION):
@@ -2056,17 +2242,20 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             _schema[vol.Required(CONF_DC_PV_CONNECTED, default=True)] = BooleanSelector()
         if brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei"):
             _schema[vol.Required(CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, default=DEFAULT_FULL_CHARGE_VOLTAGE_TAPER_ENABLED)] = bool
-        if brand == "sessy":
+        if brand in ("sessy", "zendure"):
+            # Neither reports a nominal capacity, and leaving it at 0 silently
+            # breaks system SOC, cycles, predictive charging and pricing math.
             _schema[vol.Required("battery_capacity_kwh")] = NumberSelector(
                 NumberSelectorConfig(min=0.01, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
             )
-        elif brand in ("zendure", "hoymiles"):
-            capacity_default = (
-                _hoymiles_capacity_default(self._current_battery_data)
-                if brand == "hoymiles" else 0.0
-            )
-            _schema[vol.Optional("battery_capacity_kwh", default=capacity_default)] = NumberSelector(
-                NumberSelectorConfig(min=0.01 if brand == "hoymiles" else 0, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
+        elif brand == "hoymiles":
+            _schema[
+                vol.Optional(
+                    "battery_capacity_kwh",
+                    default=_hoymiles_capacity_default(self._current_battery_data),
+                )
+            ] = NumberSelector(
+                NumberSelectorConfig(min=0.01, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
             )
         if self.config_data.get(CONF_THREE_PHASE_ENABLED):
             # Keep the established L1 suggestion for a brand-new setup while
@@ -2249,6 +2438,10 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             dynamic_power_control = user_input.get("dynamic_power_control", False)
             power_sensor = user_input.get("power_sensor") or None
             activity_sensor = user_input.get("activity_sensor") or None
+            remaining_demand_sensor = user_input.get("remaining_demand_sensor") or None
+            remaining_demand_presence_sensor = (
+                user_input.get("remaining_demand_presence_sensor") or None
+            )
             if ev_no_telemetry:
                 # Existing entries used power_sensor for this state entity.
                 # New entries store it explicitly; runtime keeps the fallback.
@@ -2265,11 +2458,14 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             excluded_device = {
                 "power_sensor": power_sensor,
                 "activity_sensor": activity_sensor,
+                "remaining_demand_sensor": remaining_demand_sensor,
+                "remaining_demand_presence_sensor": remaining_demand_presence_sensor,
                 "included_in_consumption": user_input.get("included_in_consumption", True),
                 "allow_solar_surplus": user_input.get("allow_solar_surplus", False),
                 "dynamic_power_control": dynamic_power_control,
                 "cover_home_when_active": user_input.get("cover_home_when_active", False),
                 "ev_charger_no_telemetry": ev_no_telemetry,
+                "is_ev_charger": user_input.get("is_ev_charger", False),
             }
             self.excluded_devices.append(excluded_device)
 
@@ -2295,6 +2491,20 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     vol.Optional("dynamic_power_control", default=False): bool,
                     vol.Optional("cover_home_when_active", default=False): bool,
                     vol.Optional("ev_charger_no_telemetry", default=False): bool,
+                    vol.Optional("is_ev_charger", default=False): bool,
+                    vol.Optional("remaining_demand_sensor"):
+                        EntitySelector(
+                            # No device_class filter: _read_sensor_kwh_opt accepts any
+                            # convertible energy unit, and a template helper
+                            # often carries no device_class at all.
+                            EntitySelectorConfig(domain="sensor")
+                        ),
+                    vol.Optional("remaining_demand_presence_sensor"):
+                        EntitySelector(
+                            EntitySelectorConfig(
+                                domain=["binary_sensor", "sensor", "device_tracker"]
+                            )
+                        ),
                 }
             ),
             description_placeholders={
@@ -2391,56 +2601,41 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
     async def async_step_predictive_charging_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 11a: Configure time slot predictive grid charging."""
-        errors = {}
-        # Check if solar forecast sensor was already configured in step 1
-        has_global_sensor = bool(
-            self.config_data.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
-            or self.config_data.get(CONF_SOLAR_FORECAST_SENSOR)
-        )
+        """Step 11a: Configure time slot predictive grid charging.
+
+        Only the charging windows and the optional per-mode forecast sensor
+        live here; every other predictive knob is a dashboard entity.
+        """
+        errors: dict[str, str] = {}
+        existing_config = self.config_data
 
         if user_input is not None:
-                try:
-                    if has_global_sensor:
-                        forecast_sensor = self.config_data.get(CONF_SOLAR_FORECAST_SENSOR)
-                    else:
-                        forecast_sensor = user_input.get("solar_forecast_sensor")
-                        if forecast_sensor:
-                            forecast_state = self.hass.states.get(forecast_sensor)
-                            if forecast_state is None:
-                                errors["solar_forecast_sensor"] = "sensor_not_found"
-                            else:
-                                unit = forecast_state.attributes.get("unit_of_measurement", "")
-                                if unit not in ["kWh", "Wh"]:
-                                    errors["solar_forecast_sensor"] = "invalid_unit"
+            try:
+                forecast_sensor = _resolve_forecast_sensor(
+                    self.hass, existing_config, user_input, errors
+                )
+                windows, window_errors = _parse_charging_windows(user_input)
+                errors.update(window_errors)
 
-                    windows, window_errors = _parse_charging_windows(user_input)
-                    errors.update(window_errors)
+                if not errors:
+                    self.config_data["enable_predictive_charging"] = True
+                    self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_TIME_SLOT
+                    self.config_data["charging_time_slot"] = windows
+                    self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
+                    return await self._finish_setup()
+            except Exception as e:
+                _LOGGER.error("Error validating predictive charging config: %s", e)
+                errors["base"] = "unknown"
 
-                    if not errors:
-                        self.config_data["enable_predictive_charging"] = True
-                        self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_TIME_SLOT
-                        self.config_data["charging_time_slot"] = windows
-                        self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
-                        self.config_data[CONF_PREDICTIVE_SAFETY_MARGIN_KWH] = user_input.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-                        self.config_data[CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT] = user_input.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
-
-                        return await self._finish_setup()
-                except Exception as e:
-                    _LOGGER.error("Error validating predictive charging config: %s", e)
-                    errors["base"] = "unknown"
-
-        schema_dict = _charging_window_schema_fields([])
-        if not has_global_sensor:
-            schema_dict[vol.Optional("solar_forecast_sensor")] = EntitySelector(
-                EntitySelectorConfig(domain="sensor")
-            )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, default=DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=20, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
+        schema_dict = _charging_window_schema_fields(
+            _normalize_charging_windows(existing_config.get("charging_time_slot"))
         )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, default=DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
+        if not _has_global_forecast_sensor(existing_config):
+            default_forecast = existing_config.get("solar_forecast_sensor", "")
+            schema_dict[vol.Optional(
+                "solar_forecast_sensor",
+                description={"suggested_value": default_forecast} if default_forecast else {},
+            )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
         return self.async_show_form(
             step_id="predictive_charging_config",
             data_schema=vol.Schema(schema_dict),
@@ -2450,19 +2645,21 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
     async def async_step_dynamic_pricing_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 11b: Configure dynamic pricing predictive grid charging."""
-        errors = {}
-        has_global_sensor = bool(
-            self.config_data.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
-            or self.config_data.get(CONF_SOLAR_FORECAST_SENSOR)
-        )
+        """Step 11b: Configure dynamic pricing predictive grid charging.
+
+        Only the price sources live here: they need validating against
+        ``hass.states`` and a platform reload. Thresholds, feature toggles and
+        every power/SOC limit are dashboard entities writing the same keys.
+        """
+        errors: dict[str, str] = {}
+        existing_config = self.config_data
 
         if user_input is not None:
             try:
                 integration_type = user_input[CONF_PRICE_INTEGRATION_TYPE]
                 price_sensor = user_input.get(CONF_PRICE_SENSOR)
 
-                # Tibber has no price sensor — it polls the tibber.get_prices service.
+                # Tibber has no price sensor - it polls the tibber.get_prices service.
                 if integration_type == PRICE_INTEGRATION_TIBBER:
                     price_sensor = None
                     if not self.hass.services.has_service("tibber", "get_prices"):
@@ -2470,246 +2667,162 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 elif not price_sensor:
                     errors[CONF_PRICE_SENSOR] = "sensor_not_found"
                 else:
-                    # Validate price sensor has expected attributes
-                    price_state = self.hass.states.get(price_sensor)
-                    if price_state is None:
-                        errors[CONF_PRICE_SENSOR] = "sensor_not_found"
-                    else:
-                        attrs = price_state.attributes
-                        if integration_type == PRICE_INTEGRATION_PVPC:
-                            if not any(f"price_{h:02d}h" in attrs for h in range(24)):
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        elif integration_type == PRICE_INTEGRATION_CKW:
-                            prices = attrs.get("prices")
-                            if not prices or not isinstance(prices, (list, tuple)) or len(prices) == 0:
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        elif integration_type == PRICE_INTEGRATION_EPEX:
-                            data = attrs.get("data")
-                            if not data or not isinstance(data, (list, tuple)) or len(data) == 0:
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        elif integration_type == PRICE_INTEGRATION_ENTSOE:
-                            prices = attrs.get("prices_today")
-                            if not prices or not isinstance(prices, (list, tuple)) or len(prices) == 0:
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        else:  # Nordpool
-                            if (
-                                "raw_today" not in attrs
-                                and not is_official_nordpool_sensor(
-                                    self.hass,
-                                    price_sensor,
-                                    attrs,
-                                )
-                            ):
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
+                    error = _validate_price_sensor(
+                        self.hass, price_sensor, integration_type
+                    )
+                    if error:
+                        errors[CONF_PRICE_SENSOR] = error
 
-                # Validate solar forecast sensor if not global
-                if has_global_sensor:
-                    forecast_sensor = self.config_data.get(CONF_SOLAR_FORECAST_SENSOR)
-                else:
-                    forecast_sensor = user_input.get("solar_forecast_sensor")
-                    if forecast_sensor:
-                        forecast_state = self.hass.states.get(forecast_sensor)
-                        if forecast_state is None:
-                            errors["solar_forecast_sensor"] = "sensor_not_found"
-                        else:
-                            unit = forecast_state.attributes.get("unit_of_measurement", "")
-                            if unit not in ["kWh", "Wh"]:
-                                errors["solar_forecast_sensor"] = "invalid_unit"
+                errors.update(
+                    _validate_export_price_input(self.hass, user_input, integration_type)
+                )
+                forecast_sensor = _resolve_forecast_sensor(
+                    self.hass, existing_config, user_input, errors
+                )
 
                 if not errors:
-                    max_price = _parse_optional_float(user_input.get(CONF_MAX_PRICE_THRESHOLD))
-                    discharge_price = _parse_optional_float(user_input.get(CONF_DISCHARGE_PRICE_THRESHOLD))
-
-                    if max_price is not None and discharge_price is not None and discharge_price < max_price:
-                        errors[CONF_DISCHARGE_PRICE_THRESHOLD] = "discharge_below_charge"
-                    else:
-                        self.config_data["enable_predictive_charging"] = True
-                        self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_DYNAMIC_PRICING
-                        self.config_data[CONF_PRICE_INTEGRATION_TYPE] = integration_type
-                        self.config_data[CONF_PRICE_SENSOR] = price_sensor
-                        self.config_data[CONF_MAX_PRICE_THRESHOLD] = max_price
-                        self.config_data[CONF_DISCHARGE_PRICE_THRESHOLD] = discharge_price
-                        self.config_data[CONF_DP_PRICE_DISCHARGE_CONTROL] = user_input.get(CONF_DP_PRICE_DISCHARGE_CONTROL, False)
-                        self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
-                        self.config_data["charging_time_slot"] = None
-                        self.config_data[CONF_PREDICTIVE_SAFETY_MARGIN_KWH] = user_input.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-                        self.config_data[CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT] = user_input.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
-                        self.config_data[CONF_NEGATIVE_PRICE_CHARGING_ENABLED] = user_input.get(
-                            CONF_NEGATIVE_PRICE_CHARGING_ENABLED,
-                            DEFAULT_NEGATIVE_PRICE_CHARGING_ENABLED,
-                        )
-                        self.config_data[CONF_SMART_PREDISCHARGE_ENABLED] = user_input.get(
-                            CONF_SMART_PREDISCHARGE_ENABLED, DEFAULT_SMART_PREDISCHARGE_ENABLED
-                        )
-                        self.config_data[CONF_NEGATIVE_INJECTION_THRESHOLD] = user_input.get(
-                            CONF_NEGATIVE_INJECTION_THRESHOLD, DEFAULT_NEGATIVE_INJECTION_THRESHOLD
-                        )
-                        self.config_data[CONF_PREDISCHARGE_RESERVE_SOC] = user_input.get(
-                            CONF_PREDISCHARGE_RESERVE_SOC, DEFAULT_PREDISCHARGE_RESERVE_SOC
-                        )
-                        export_mode, export_power = _predischarge_export_from_input(
-                            user_input,
-                            fallback_mode=DEFAULT_PREDISCHARGE_EXPORT_MODE,
-                            fallback_power=DEFAULT_PREDISCHARGE_MAX_EXPORT_POWER_W,
-                        )
-                        self.config_data[CONF_PREDISCHARGE_EXPORT_MODE] = export_mode
-                        self.config_data[CONF_PREDISCHARGE_MAX_EXPORT_POWER_W] = export_power
-                        if (
-                            export_mode == PREDISCHARGE_EXPORT_MODE_CUSTOM
-                            and CONF_PREDISCHARGE_MAX_EXPORT_POWER_W not in user_input
-                        ):
-                            return await self.async_step_predischarge_export_limit()
-                        return await self._finish_setup()
+                    self.config_data["enable_predictive_charging"] = True
+                    self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_DYNAMIC_PRICING
+                    self.config_data[CONF_PRICE_INTEGRATION_TYPE] = integration_type
+                    self.config_data[CONF_PRICE_SENSOR] = price_sensor
+                    self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
+                    self.config_data["charging_time_slot"] = None
+                    # Cleared entity/select fields arrive absent, so read them
+                    # straight from the submission rather than falling back to
+                    # the stored value - that is what makes the clear button work.
+                    self.config_data[CONF_EXPORT_PRICE_SENSOR] = user_input.get(
+                        CONF_EXPORT_PRICE_SENSOR
+                    )
+                    self.config_data[CONF_EXPORT_PRICE_INTEGRATION_TYPE] = user_input.get(
+                        CONF_EXPORT_PRICE_INTEGRATION_TYPE
+                    )
+                    self.config_data[CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED] = user_input.get(
+                        CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                        existing_config.get(
+                            CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                            DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                        ),
+                    )
+                    return await self._finish_setup()
             except Exception as e:
                 _LOGGER.error("Error validating dynamic pricing config: %s", e)
                 errors["base"] = "unknown"
 
+        form_input = user_input or {}
+        default_integration = form_input.get(
+            CONF_PRICE_INTEGRATION_TYPE,
+            existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL),
+        )
+        default_sensor = form_input.get(
+            CONF_PRICE_SENSOR, existing_config.get(CONF_PRICE_SENSOR, "")
+        )
+        default_export_sensor = (
+            form_input.get(CONF_EXPORT_PRICE_SENSOR)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_SENSOR)
+        )
+        default_export_type = (
+            form_input.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+        )
+
         schema_dict: dict = {
-            vol.Required(CONF_PRICE_INTEGRATION_TYPE, default=PRICE_INTEGRATION_NORDPOOL):
-                SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            PRICE_INTEGRATION_NORDPOOL,
-                            PRICE_INTEGRATION_PVPC,
-                            PRICE_INTEGRATION_CKW,
-                            PRICE_INTEGRATION_EPEX,
-                            PRICE_INTEGRATION_ENTSOE,
-                            PRICE_INTEGRATION_TIBBER,
-                        ],
-                        translation_key="price_integration_type",
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
+            vol.Required(CONF_PRICE_INTEGRATION_TYPE, default=default_integration):
+                _price_integration_type_selector(),
             # Optional: not used by Tibber, which polls the tibber.get_prices service.
-            vol.Optional(CONF_PRICE_SENSOR):
+            vol.Optional(CONF_PRICE_SENSOR, default=default_sensor if default_sensor else vol.UNDEFINED):
                 EntitySelector(EntitySelectorConfig(domain="sensor")),
-            vol.Optional(CONF_MAX_PRICE_THRESHOLD):
-                TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(CONF_DISCHARGE_PRICE_THRESHOLD):
-                TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Required(CONF_DP_PRICE_DISCHARGE_CONTROL, default=False): bool,
         }
-        if not has_global_sensor:
-            schema_dict[vol.Optional("solar_forecast_sensor")] = EntitySelector(
-                EntitySelectorConfig(domain="sensor")
+        # Clearable: suggested_value pre-fills without voluptuous restoring the
+        # old value when the field is emptied.
+        schema_dict[vol.Optional(
+            CONF_EXPORT_PRICE_SENSOR,
+            description={"suggested_value": default_export_sensor} if default_export_sensor else {},
+        )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+        schema_dict[vol.Optional(
+            CONF_EXPORT_PRICE_INTEGRATION_TYPE,
+            description={"suggested_value": default_export_type} if default_export_type else {},
+        )] = _price_integration_type_selector(_price_integration_export_options())
+        # Always shown: the provider is picked in this same form, so hiding it
+        # until Zonneplan is saved meant a second visit. The engine ignores it
+        # unless the export curve is Zonneplan.
+        schema_dict[vol.Optional(
+            CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+            default=form_input.get(
+                CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                existing_config.get(
+                    CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                ),
+            ),
+        )] = BooleanSelector()
+        if not _has_global_forecast_sensor(existing_config):
+            default_forecast = (
+                form_input.get("solar_forecast_sensor")
+                if user_input is not None
+                else existing_config.get("solar_forecast_sensor", "")
             )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, default=DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=20, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, default=DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_NEGATIVE_PRICE_CHARGING_ENABLED, default=DEFAULT_NEGATIVE_PRICE_CHARGING_ENABLED)] = bool
-        schema_dict[vol.Optional(CONF_SMART_PREDISCHARGE_ENABLED, default=DEFAULT_SMART_PREDISCHARGE_ENABLED)] = bool
-        schema_dict[vol.Optional(CONF_NEGATIVE_INJECTION_THRESHOLD, default=DEFAULT_NEGATIVE_INJECTION_THRESHOLD)] = NumberSelector(
-            NumberSelectorConfig(min=-2, max=2, step=0.001, unit_of_measurement="€/kWh", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_PREDISCHARGE_RESERVE_SOC, default=DEFAULT_PREDISCHARGE_RESERVE_SOC)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
-        mode_field, mode_selector = _predischarge_export_mode_selector(
-            DEFAULT_PREDISCHARGE_EXPORT_MODE
-        )
-        schema_dict[mode_field] = mode_selector
+            schema_dict[vol.Optional(
+                "solar_forecast_sensor",
+                description={"suggested_value": default_forecast} if default_forecast else {},
+            )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
         return self.async_show_form(
             step_id="dynamic_pricing_config",
             data_schema=vol.Schema(schema_dict),
             errors=errors,
         )
 
-    async def async_step_predischarge_export_limit(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Configure the W limit only for the custom export policy."""
-        if user_input is not None:
-            _mode, export_power = _predischarge_export_from_input(
-                user_input,
-                fallback_mode=PREDISCHARGE_EXPORT_MODE_CUSTOM,
-            )
-            self.config_data[CONF_PREDISCHARGE_EXPORT_MODE] = PREDISCHARGE_EXPORT_MODE_CUSTOM
-            self.config_data[CONF_PREDISCHARGE_MAX_EXPORT_POWER_W] = export_power
-            return await self._finish_setup()
-
-        _mode, export_power = _predischarge_export_defaults(
-            self.config_data,
-            default_mode=PREDISCHARGE_EXPORT_MODE_CUSTOM,
-        )
-        limit_field, limit_selector = _predischarge_export_limit_selector(export_power)
-        return self.async_show_form(
-            step_id="predischarge_export_limit",
-            data_schema=vol.Schema({limit_field: limit_selector}),
-        )
-
     async def async_step_realtime_price_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 11d: Configure real-time price charging mode."""
-        errors = {}
-        has_global_sensor = bool(
-            self.config_data.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
-            or self.config_data.get(CONF_SOLAR_FORECAST_SENSOR)
-        )
+        """Step 11d: Configure real-time price charging mode.
+
+        Only the price sensors live here; the max-price threshold and the
+        price discharge control are dashboard entities writing the same keys.
+        """
+        errors: dict[str, str] = {}
+        existing_config = self.config_data
 
         if user_input is not None:
             try:
                 price_sensor = user_input[CONF_PRICE_SENSOR]
-                price_state = self.hass.states.get(price_sensor)
-                if price_state is None:
+                if self.hass.states.get(price_sensor) is None:
                     errors[CONF_PRICE_SENSOR] = "sensor_not_found"
-
-                if has_global_sensor:
-                    forecast_sensor = self.config_data.get(CONF_SOLAR_FORECAST_SENSOR)
-                else:
-                    forecast_sensor = user_input.get("solar_forecast_sensor")
-                    if forecast_sensor:
-                        forecast_state = self.hass.states.get(forecast_sensor)
-                        if forecast_state is None:
-                            errors["solar_forecast_sensor"] = "sensor_not_found"
-                        else:
-                            unit = forecast_state.attributes.get("unit_of_measurement", "")
-                            if unit not in ["kWh", "Wh"]:
-                                errors["solar_forecast_sensor"] = "invalid_unit"
+                forecast_sensor = _resolve_forecast_sensor(
+                    self.hass, existing_config, user_input, errors
+                )
 
                 if not errors:
-                    max_price_raw = user_input.get(CONF_MAX_PRICE_THRESHOLD)
-                    max_price = float(str(max_price_raw).replace(",", ".")) if max_price_raw else None
-                    avg_sensor = user_input.get(CONF_AVERAGE_PRICE_SENSOR) or None
-
                     self.config_data["enable_predictive_charging"] = True
                     self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_REALTIME_PRICE
                     self.config_data[CONF_PRICE_SENSOR] = price_sensor
-                    self.config_data[CONF_MAX_PRICE_THRESHOLD] = max_price
-                    self.config_data[CONF_AVERAGE_PRICE_SENSOR] = avg_sensor
-                    self.config_data[CONF_RT_PRICE_DISCHARGE_CONTROL] = user_input.get(CONF_RT_PRICE_DISCHARGE_CONTROL, False)
+                    self.config_data[CONF_AVERAGE_PRICE_SENSOR] = user_input.get(CONF_AVERAGE_PRICE_SENSOR) or None
                     self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
                     self.config_data["charging_time_slot"] = None
-                    self.config_data[CONF_PREDICTIVE_SAFETY_MARGIN_KWH] = user_input.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-                    self.config_data[CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT] = user_input.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
-
                     return await self._finish_setup()
             except Exception as e:
                 _LOGGER.error("Error validating real-time price config: %s", e)
                 errors["base"] = "unknown"
 
+        default_sensor = existing_config.get(CONF_PRICE_SENSOR, "")
+        default_avg_sensor = existing_config.get(CONF_AVERAGE_PRICE_SENSOR, "")
+
         schema_dict: dict = {
-            vol.Required(CONF_PRICE_SENSOR):
+            vol.Required(CONF_PRICE_SENSOR, default=default_sensor if default_sensor else vol.UNDEFINED):
                 EntitySelector(EntitySelectorConfig(domain="sensor")),
-            vol.Optional(CONF_MAX_PRICE_THRESHOLD):
-                TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(CONF_AVERAGE_PRICE_SENSOR):
+            vol.Optional(
+                CONF_AVERAGE_PRICE_SENSOR,
+                description={"suggested_value": default_avg_sensor} if default_avg_sensor else {}
+            ):
                 EntitySelector(EntitySelectorConfig(domain="sensor")),
-            vol.Required(CONF_RT_PRICE_DISCHARGE_CONTROL, default=False): bool,
         }
-        if not has_global_sensor:
-            schema_dict[vol.Optional("solar_forecast_sensor")] = EntitySelector(
-                EntitySelectorConfig(domain="sensor")
-            )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, default=DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=20, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, default=DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
+        if not _has_global_forecast_sensor(existing_config):
+            default_forecast = existing_config.get("solar_forecast_sensor", "")
+            schema_dict[vol.Optional(
+                "solar_forecast_sensor",
+                description={"suggested_value": default_forecast} if default_forecast else {},
+            )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
         return self.async_show_form(
             step_id="realtime_price_config",
             data_schema=vol.Schema(schema_dict),
@@ -2827,6 +2940,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             battery_version = user_input.get(CONF_BATTERY_VERSION, DEFAULT_VERSION)
             slave_id = user_input.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID)
             serial_port = (user_input.get(CONF_SERIAL_PORT) or "").strip()
+            rs485_gateway = bool(user_input.get(CONF_RS485_GATEWAY, False))
             new_host = (user_input.get(CONF_HOST) or "").strip()
             is_serial = bool(serial_port)
 
@@ -2862,6 +2976,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 updated[CONF_HOST] = new_host
                 updated[CONF_PORT] = new_port
                 updated[CONF_SERIAL_PORT] = serial_port
+                updated[CONF_RS485_GATEWAY] = rs485_gateway
                 updated[CONF_SLAVE_ID] = slave_id
                 updated[CONF_BATTERY_VERSION] = battery_version
                 updated["ems_version"] = getattr(
@@ -2882,6 +2997,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             CONF_HOST: current.get(CONF_HOST, ""),
             CONF_PORT: current.get(CONF_PORT, 502),
             CONF_SERIAL_PORT: current.get(CONF_SERIAL_PORT, ""),
+            CONF_RS485_GATEWAY: current.get(CONF_RS485_GATEWAY, False),
             CONF_SLAVE_ID: current.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID),
             CONF_BATTERY_VERSION: current.get(CONF_BATTERY_VERSION, DEFAULT_VERSION),
         }
@@ -2897,6 +3013,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     vol.Optional(CONF_HOST, default=host_default): str,
                     vol.Optional(CONF_PORT, default=defaults[CONF_PORT]): int,
                     vol.Optional(CONF_SERIAL_PORT, default=defaults[CONF_SERIAL_PORT]): str,
+                    vol.Optional(CONF_RS485_GATEWAY, default=defaults[CONF_RS485_GATEWAY]): bool,
                     vol.Required(CONF_SLAVE_ID, default=defaults[CONF_SLAVE_ID]):
                         vol.All(NumberSelector(NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
                     vol.Required(
@@ -3554,6 +3671,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
         return refusal
 
 
+@_preserve_values_in_error_forms
 class OptionsFlowHandler(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
@@ -3666,15 +3784,44 @@ class OptionsFlowHandler(OptionsFlow):
         # Weekly full charge, charge delay, temperature charge limit, capacity
         # protection, hourly balance and the PD controller are configured live
         # from the dashboard entities, not here.
-        return self.async_show_menu(
-            step_id="init",
-            menu_options=[
-                "sensors",
-                "batteries",
-                "time_slots",
-                "excluded_devices",
-                "predictive_charging",
-            ],
+        menu_options = [
+            "sensors",
+            "batteries",
+            "time_slots",
+            "excluded_devices",
+            "predictive_charging",
+        ]
+        return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    async def async_step_remove_battery(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Remove one specific battery (the count flow can only drop the last one)."""
+        batteries = list(self.config_entry.data.get("batteries", []))
+        if user_input is not None:
+            removed = batteries.pop(int(user_input["battery"]))
+            self.config_data["batteries"] = batteries
+            if self.config_entry.data.get(CONF_PRIMARY_BATTERY) == removed.get(CONF_NAME):
+                self.config_data[CONF_PRIMARY_BATTERY] = ""
+            result = await self._save_and_finish()
+            # Drop the now-orphaned device (and its entities); same key as coordinator.device_key.
+            slave = removed.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID)
+            key = f"{removed.get(CONF_HOST)}_{removed.get(CONF_PORT)}"
+            if slave != 1:
+                key = f"{key}_{slave}"
+            dev_reg = dr.async_get(self.hass)
+            if device := dev_reg.async_get_device(identifiers={(DOMAIN, key)}):
+                dev_reg.async_remove_device(device.id)
+            return result
+
+        return self.async_show_form(
+            step_id="remove_battery",
+            data_schema=vol.Schema({
+                vol.Required("battery"): SelectSelector(SelectSelectorConfig(
+                    options=[
+                        {"value": str(i), "label": b.get(CONF_NAME, f"Battery {i + 1}")}
+                        for i, b in enumerate(batteries)
+                    ],
+                )),
+            }),
         )
 
     async def async_step_sensors(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -3708,6 +3855,14 @@ class OptionsFlowHandler(OptionsFlow):
                 errors.update(_validate_offgrid_power_sensor(self.hass, user_input))
 
                 if not errors:
+                    # Runs after validation so a preserved dead reference cannot
+                    # block the save with `sensor_not_found` (#419).
+                    user_input = _restore_unrenderable_sensors(
+                        self.hass, user_input, self.config_entry.data
+                    )
+                    forecast_sensor = user_input.get(CONF_SOLAR_FORECAST_SENSOR)
+                    remaining_sensor = user_input.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
+                    solar_sensor = user_input.get(CONF_SOLAR_PRODUCTION_SENSOR)
                     self.config_data["consumption_sensor"] = user_input["consumption_sensor"]
                     self.config_data[CONF_OFFGRID_POWER_SENSOR] = (
                         user_input.get(CONF_OFFGRID_POWER_SENSOR) or None
@@ -3877,6 +4032,12 @@ class OptionsFlowHandler(OptionsFlow):
         )
 
     async def async_step_batteries(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Batteries submenu: add/modify, or remove a specific one (needs 2+)."""
+        if len(self.config_entry.data.get("batteries", [])) < 2:
+            return await self.async_step_battery_count()
+        return self.async_show_menu(step_id="batteries", menu_options=["battery_count", "remove_battery"])
+
+    async def async_step_battery_count(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure number of batteries."""
         try:
             if user_input is not None:
@@ -3891,7 +4052,7 @@ class OptionsFlowHandler(OptionsFlow):
             return self.async_abort(reason="unknown_error")
 
         return self.async_show_form(
-            step_id="batteries",
+            step_id="battery_count",
             data_schema=_battery_count_schema(current_batteries),
         )
 
@@ -3956,6 +4117,7 @@ class OptionsFlowHandler(OptionsFlow):
                 battery_version = user_input.get(CONF_BATTERY_VERSION, DEFAULT_VERSION)
                 slave_id = user_input.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID)
                 serial_port = (user_input.get(CONF_SERIAL_PORT) or "").strip()
+                rs485_gateway = bool(user_input.get(CONF_RS485_GATEWAY, False))
                 host = (user_input.get(CONF_HOST) or "").strip()
                 is_serial = bool(serial_port)
 
@@ -3979,6 +4141,7 @@ class OptionsFlowHandler(OptionsFlow):
                         CONF_HOST: host,
                         CONF_PORT: port,
                         CONF_SERIAL_PORT: serial_port,
+                        CONF_RS485_GATEWAY: rs485_gateway,
                         CONF_SLAVE_ID: slave_id,
                         CONF_BATTERY_VERSION: battery_version,
                         "brand": "marstek",
@@ -3993,6 +4156,7 @@ class OptionsFlowHandler(OptionsFlow):
                     CONF_HOST: current_battery.get(CONF_HOST, ""),
                     CONF_PORT: current_battery.get(CONF_PORT, 502),
                     CONF_SERIAL_PORT: current_battery.get(CONF_SERIAL_PORT, ""),
+                    CONF_RS485_GATEWAY: current_battery.get(CONF_RS485_GATEWAY, False),
                     CONF_SLAVE_ID: current_battery.get(CONF_SLAVE_ID, DEFAULT_SLAVE_ID),
                     CONF_BATTERY_VERSION: current_battery.get(CONF_BATTERY_VERSION, DEFAULT_VERSION),
                 }
@@ -4002,6 +4166,7 @@ class OptionsFlowHandler(OptionsFlow):
                     CONF_HOST: "",
                     CONF_PORT: 502,
                     CONF_SERIAL_PORT: "",
+                    CONF_RS485_GATEWAY: False,
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_BATTERY_VERSION: DEFAULT_VERSION,
                 }
@@ -4021,6 +4186,7 @@ class OptionsFlowHandler(OptionsFlow):
                     vol.Optional(CONF_HOST, default=host_default): str,
                     vol.Optional(CONF_PORT, default=defaults[CONF_PORT]): int,
                     vol.Optional(CONF_SERIAL_PORT, default=defaults[CONF_SERIAL_PORT]): str,
+                    vol.Optional(CONF_RS485_GATEWAY, default=defaults[CONF_RS485_GATEWAY]): bool,
                     vol.Required(CONF_SLAVE_ID, default=defaults[CONF_SLAVE_ID]):
                         vol.All(NumberSelector(NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
                     vol.Required(CONF_BATTERY_VERSION, default=defaults[CONF_BATTERY_VERSION]):
@@ -4738,7 +4904,7 @@ class OptionsFlowHandler(OptionsFlow):
             ] = BooleanSelector()
         if brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei"):
             _schema[vol.Required(CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, default=defaults[CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED])] = bool
-        if brand == "sessy":
+        if brand in ("sessy", "zendure"):
             saved_capacity = float(defaults["battery_capacity_kwh"])
             capacity_field = (
                 vol.Required("battery_capacity_kwh", default=saved_capacity)
@@ -4748,9 +4914,9 @@ class OptionsFlowHandler(OptionsFlow):
             _schema[capacity_field] = NumberSelector(
                 NumberSelectorConfig(min=0.01, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
             )
-        elif brand in ("zendure", "hoymiles"):
+        elif brand == "hoymiles":
             _schema[vol.Optional("battery_capacity_kwh", default=defaults["battery_capacity_kwh"])] = NumberSelector(
-                NumberSelectorConfig(min=0.01 if brand == "hoymiles" else 0, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
+                NumberSelectorConfig(min=0.01, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
             )
         if self.config_entry.data.get(
             CONF_THREE_PHASE_ENABLED,
@@ -4946,6 +5112,10 @@ class OptionsFlowHandler(OptionsFlow):
             dynamic_power_control = user_input.get("dynamic_power_control", False)
             power_sensor = user_input.get("power_sensor") or None
             activity_sensor = user_input.get("activity_sensor") or None
+            remaining_demand_sensor = user_input.get("remaining_demand_sensor") or None
+            remaining_demand_presence_sensor = (
+                user_input.get("remaining_demand_presence_sensor") or None
+            )
             if ev_no_telemetry:
                 activity_sensor = activity_sensor or power_sensor
                 if not activity_sensor:
@@ -4960,11 +5130,17 @@ class OptionsFlowHandler(OptionsFlow):
             excluded_device = {
                 "power_sensor": power_sensor,
                 "activity_sensor": activity_sensor,
+                # Always written, None included: the merge below lays this dict
+                # over the stored one, so an omitted key would resurrect the old
+                # value and the field could never be cleared.
+                "remaining_demand_sensor": remaining_demand_sensor,
+                "remaining_demand_presence_sensor": remaining_demand_presence_sensor,
                 "included_in_consumption": user_input.get("included_in_consumption", True),
                 "allow_solar_surplus": user_input.get("allow_solar_surplus", False),
                 "dynamic_power_control": dynamic_power_control,
                 "cover_home_when_active": user_input.get("cover_home_when_active", False),
                 "ev_charger_no_telemetry": ev_no_telemetry,
+                "is_ev_charger": user_input.get("is_ev_charger", False),
             }
             # The Enabled switch and the Exclusion % slider write straight into
             # the stored record and have no field on this form. Lay the form
@@ -5002,7 +5178,12 @@ class OptionsFlowHandler(OptionsFlow):
             default_dynamic_power_control = current_device.get("dynamic_power_control", False)
             default_cover_home = current_device.get("cover_home_when_active", False)
             default_ev_no_telemetry = current_device.get("ev_charger_no_telemetry", False)
+            default_is_ev_charger = current_device.get("is_ev_charger", False)
             default_activity_sensor = current_device.get("activity_sensor", "")
+            default_remaining_demand = current_device.get("remaining_demand_sensor") or ""
+            default_remaining_presence = (
+                current_device.get("remaining_demand_presence_sensor") or ""
+            )
             if default_ev_no_telemetry and not default_activity_sensor:
                 # Legacy no-telemetry entries stored their state entity in the
                 # power_sensor field. Show it in the new field automatically.
@@ -5014,7 +5195,10 @@ class OptionsFlowHandler(OptionsFlow):
             default_dynamic_power_control = False
             default_cover_home = False
             default_ev_no_telemetry = False
+            default_is_ev_charger = False
             default_activity_sensor = ""
+            default_remaining_demand = ""
+            default_remaining_presence = ""
 
         device_num += 1
         power_sensor_field = (
@@ -5026,6 +5210,18 @@ class OptionsFlowHandler(OptionsFlow):
             vol.Optional("activity_sensor", default=default_activity_sensor)
             if default_activity_sensor
             else vol.Optional("activity_sensor")
+        )
+        remaining_demand_field = (
+            vol.Optional("remaining_demand_sensor", default=default_remaining_demand)
+            if default_remaining_demand
+            else vol.Optional("remaining_demand_sensor")
+        )
+        remaining_presence_field = (
+            vol.Optional(
+                "remaining_demand_presence_sensor", default=default_remaining_presence
+            )
+            if default_remaining_presence
+            else vol.Optional("remaining_demand_presence_sensor")
         )
         return self.async_show_form(
             step_id="add_excluded_device",
@@ -5040,6 +5236,20 @@ class OptionsFlowHandler(OptionsFlow):
                     vol.Optional("dynamic_power_control", default=default_dynamic_power_control): bool,
                     vol.Optional("cover_home_when_active", default=default_cover_home): bool,
                     vol.Optional("ev_charger_no_telemetry", default=default_ev_no_telemetry): bool,
+                    vol.Optional("is_ev_charger", default=default_is_ev_charger): bool,
+                    remaining_demand_field:
+                        EntitySelector(
+                            # No device_class filter: _read_sensor_kwh_opt accepts any
+                            # convertible energy unit, and a template helper
+                            # often carries no device_class at all.
+                            EntitySelectorConfig(domain="sensor")
+                        ),
+                    remaining_presence_field:
+                        EntitySelector(
+                            EntitySelectorConfig(
+                                domain=["binary_sensor", "sensor", "device_tracker"]
+                            )
+                        ),
                 }
             ),
             description_placeholders={
@@ -5140,33 +5350,19 @@ class OptionsFlowHandler(OptionsFlow):
     async def async_step_predictive_charging_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure time slot predictive grid charging in options flow."""
-        errors = {}
+        """Configure time slot predictive grid charging in options flow.
 
+        Only the charging windows and the optional per-mode forecast sensor
+        live here; every other predictive knob is a dashboard entity.
+        """
+        errors: dict[str, str] = {}
         existing_config = self.config_entry.data
-        existing_windows = _normalize_charging_windows(existing_config.get("charging_time_slot"))
-        forecast_sensor_current = existing_config.get("solar_forecast_sensor", "")
-
-        has_global_sensor = bool(
-            self.config_entry.data.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
-            or self.config_entry.data.get(CONF_SOLAR_FORECAST_SENSOR)
-        )
 
         if user_input is not None:
             try:
-                if has_global_sensor:
-                    forecast_sensor = self.config_entry.data.get(CONF_SOLAR_FORECAST_SENSOR)
-                else:
-                    forecast_sensor = user_input.get("solar_forecast_sensor")
-                    if forecast_sensor:
-                        forecast_state = self.hass.states.get(forecast_sensor)
-                        if forecast_state is None:
-                            errors["solar_forecast_sensor"] = "sensor_not_found"
-                        else:
-                            unit = forecast_state.attributes.get("unit_of_measurement", "")
-                            if unit not in ["kWh", "Wh"]:
-                                errors["solar_forecast_sensor"] = "invalid_unit"
-
+                forecast_sensor = _resolve_forecast_sensor(
+                    self.hass, existing_config, user_input, errors
+                )
                 windows, window_errors = _parse_charging_windows(user_input)
                 errors.update(window_errors)
 
@@ -5175,30 +5371,20 @@ class OptionsFlowHandler(OptionsFlow):
                     self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_TIME_SLOT
                     self.config_data["charging_time_slot"] = windows
                     self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
-                    self.config_data[CONF_PREDICTIVE_SAFETY_MARGIN_KWH] = user_input.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-                    self.config_data[CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT] = user_input.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
                     return await self._save_and_finish()
             except Exception as e:
                 _LOGGER.error("Error validating predictive charging config: %s", e)
                 errors["base"] = "unknown"
 
-        defaults = {
-            "sensor": forecast_sensor_current if forecast_sensor_current else "",
-            "margin": existing_config.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH),
-            "grid_margin": existing_config.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT),
-        }
-
-        schema_dict = _charging_window_schema_fields(existing_windows)
-        if not has_global_sensor:
-            schema_dict[vol.Optional("solar_forecast_sensor", description={"suggested_value": defaults["sensor"]} if defaults["sensor"] else {})] = EntitySelector(
-                EntitySelectorConfig(domain="sensor")
-            )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, default=defaults["margin"])] = NumberSelector(
-            NumberSelectorConfig(min=0, max=20, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
+        schema_dict = _charging_window_schema_fields(
+            _normalize_charging_windows(existing_config.get("charging_time_slot"))
         )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, default=defaults["grid_margin"])] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
+        if not _has_global_forecast_sensor(existing_config):
+            default_forecast = existing_config.get("solar_forecast_sensor", "")
+            schema_dict[vol.Optional(
+                "solar_forecast_sensor",
+                description={"suggested_value": default_forecast} if default_forecast else {},
+            )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
         return self.async_show_form(
             step_id="predictive_charging_config",
             data_schema=vol.Schema(schema_dict),
@@ -5208,12 +5394,13 @@ class OptionsFlowHandler(OptionsFlow):
     async def async_step_dynamic_pricing_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure dynamic pricing predictive grid charging in options flow."""
-        errors = {}
-        has_global_sensor = bool(
-            self.config_entry.data.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
-            or self.config_entry.data.get(CONF_SOLAR_FORECAST_SENSOR)
-        )
+        """Configure dynamic pricing predictive grid charging in options flow.
+
+        Only the price sources live here: they need validating against
+        ``hass.states`` and a platform reload. Thresholds, feature toggles and
+        every power/SOC limit are dashboard entities writing the same keys.
+        """
+        errors: dict[str, str] = {}
         existing_config = self.config_entry.data
 
         if user_input is not None:
@@ -5221,7 +5408,7 @@ class OptionsFlowHandler(OptionsFlow):
                 integration_type = user_input[CONF_PRICE_INTEGRATION_TYPE]
                 price_sensor = user_input.get(CONF_PRICE_SENSOR)
 
-                # Tibber has no price sensor — it polls the tibber.get_prices service.
+                # Tibber has no price sensor - it polls the tibber.get_prices service.
                 if integration_type == PRICE_INTEGRATION_TIBBER:
                     price_sensor = None
                     if not self.hass.services.has_service("tibber", "get_prices"):
@@ -5229,299 +5416,162 @@ class OptionsFlowHandler(OptionsFlow):
                 elif not price_sensor:
                     errors[CONF_PRICE_SENSOR] = "sensor_not_found"
                 else:
-                    price_state = self.hass.states.get(price_sensor)
-                    if price_state is None:
-                        errors[CONF_PRICE_SENSOR] = "sensor_not_found"
-                    else:
-                        attrs = price_state.attributes
-                        if integration_type == PRICE_INTEGRATION_PVPC:
-                            if not any(f"price_{h:02d}h" in attrs for h in range(24)):
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        elif integration_type == PRICE_INTEGRATION_CKW:
-                            prices = attrs.get("prices")
-                            if not prices or not isinstance(prices, (list, tuple)) or len(prices) == 0:
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        elif integration_type == PRICE_INTEGRATION_EPEX:
-                            data = attrs.get("data")
-                            if not data or not isinstance(data, (list, tuple)) or len(data) == 0:
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        elif integration_type == PRICE_INTEGRATION_ENTSOE:
-                            prices = attrs.get("prices_today")
-                            if not prices or not isinstance(prices, (list, tuple)) or len(prices) == 0:
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
-                        else:  # Nordpool
-                            if (
-                                "raw_today" not in attrs
-                                and not is_official_nordpool_sensor(
-                                    self.hass,
-                                    price_sensor,
-                                    attrs,
-                                )
-                            ):
-                                errors[CONF_PRICE_SENSOR] = "no_price_data"
+                    error = _validate_price_sensor(
+                        self.hass, price_sensor, integration_type
+                    )
+                    if error:
+                        errors[CONF_PRICE_SENSOR] = error
 
-                if has_global_sensor:
-                    forecast_sensor = self.config_entry.data.get(CONF_SOLAR_FORECAST_SENSOR)
-                else:
-                    forecast_sensor = user_input.get("solar_forecast_sensor")
-                    if forecast_sensor:
-                        forecast_state = self.hass.states.get(forecast_sensor)
-                        if forecast_state is None:
-                            errors["solar_forecast_sensor"] = "sensor_not_found"
-                        else:
-                            unit = forecast_state.attributes.get("unit_of_measurement", "")
-                            if unit not in ["kWh", "Wh"]:
-                                errors["solar_forecast_sensor"] = "invalid_unit"
+                errors.update(
+                    _validate_export_price_input(self.hass, user_input, integration_type)
+                )
+                forecast_sensor = _resolve_forecast_sensor(
+                    self.hass, existing_config, user_input, errors
+                )
 
                 if not errors:
-                    max_price = _parse_optional_float(user_input.get(CONF_MAX_PRICE_THRESHOLD))
-                    discharge_price = _parse_optional_float(user_input.get(CONF_DISCHARGE_PRICE_THRESHOLD))
-
-                    if max_price is not None and discharge_price is not None and discharge_price < max_price:
-                        errors[CONF_DISCHARGE_PRICE_THRESHOLD] = "discharge_below_charge"
-                    else:
-                        self.config_data["enable_predictive_charging"] = True
-                        self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_DYNAMIC_PRICING
-                        self.config_data[CONF_PRICE_INTEGRATION_TYPE] = integration_type
-                        self.config_data[CONF_PRICE_SENSOR] = price_sensor
-                        self.config_data[CONF_MAX_PRICE_THRESHOLD] = max_price
-                        self.config_data[CONF_DISCHARGE_PRICE_THRESHOLD] = discharge_price
-                        self.config_data[CONF_DP_PRICE_DISCHARGE_CONTROL] = user_input.get(CONF_DP_PRICE_DISCHARGE_CONTROL, False)
-                        self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
-                        self.config_data["charging_time_slot"] = None
-                        self.config_data[CONF_PREDICTIVE_SAFETY_MARGIN_KWH] = user_input.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-                        self.config_data[CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT] = user_input.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
-                        self.config_data[CONF_NEGATIVE_PRICE_CHARGING_ENABLED] = user_input.get(
-                            CONF_NEGATIVE_PRICE_CHARGING_ENABLED,
-                            existing_config.get(CONF_NEGATIVE_PRICE_CHARGING_ENABLED, DEFAULT_NEGATIVE_PRICE_CHARGING_ENABLED),
-                        )
-                        self.config_data[CONF_SMART_PREDISCHARGE_ENABLED] = user_input.get(
-                            CONF_SMART_PREDISCHARGE_ENABLED,
-                            existing_config.get(CONF_SMART_PREDISCHARGE_ENABLED, DEFAULT_SMART_PREDISCHARGE_ENABLED),
-                        )
-                        self.config_data[CONF_NEGATIVE_INJECTION_THRESHOLD] = user_input.get(
-                            CONF_NEGATIVE_INJECTION_THRESHOLD,
-                            existing_config.get(CONF_NEGATIVE_INJECTION_THRESHOLD, DEFAULT_NEGATIVE_INJECTION_THRESHOLD),
-                        )
-                        self.config_data[CONF_PREDISCHARGE_RESERVE_SOC] = user_input.get(
-                            CONF_PREDISCHARGE_RESERVE_SOC,
-                            existing_config.get(CONF_PREDISCHARGE_RESERVE_SOC, DEFAULT_PREDISCHARGE_RESERVE_SOC),
-                        )
-                        existing_export_mode, existing_export_power = _predischarge_export_defaults(
-                            existing_config,
-                            default_mode=PREDISCHARGE_EXPORT_MODE_SELF_CONSUMPTION,
-                        )
-                        export_mode, export_power = _predischarge_export_from_input(
-                            user_input,
-                            fallback_mode=existing_export_mode,
-                            fallback_power=existing_export_power,
-                        )
-                        self.config_data[CONF_PREDISCHARGE_EXPORT_MODE] = export_mode
-                        self.config_data[CONF_PREDISCHARGE_MAX_EXPORT_POWER_W] = export_power
-                        if (
-                            export_mode == PREDISCHARGE_EXPORT_MODE_CUSTOM
-                            and CONF_PREDISCHARGE_MAX_EXPORT_POWER_W not in user_input
-                        ):
-                            return await self.async_step_predischarge_export_limit()
-                        return await self._save_and_finish()
+                    self.config_data["enable_predictive_charging"] = True
+                    self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_DYNAMIC_PRICING
+                    self.config_data[CONF_PRICE_INTEGRATION_TYPE] = integration_type
+                    self.config_data[CONF_PRICE_SENSOR] = price_sensor
+                    self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
+                    self.config_data["charging_time_slot"] = None
+                    # Cleared entity/select fields arrive absent, so read them
+                    # straight from the submission rather than falling back to
+                    # the stored value - that is what makes the clear button work.
+                    self.config_data[CONF_EXPORT_PRICE_SENSOR] = user_input.get(
+                        CONF_EXPORT_PRICE_SENSOR
+                    )
+                    self.config_data[CONF_EXPORT_PRICE_INTEGRATION_TYPE] = user_input.get(
+                        CONF_EXPORT_PRICE_INTEGRATION_TYPE
+                    )
+                    self.config_data[CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED] = user_input.get(
+                        CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                        existing_config.get(
+                            CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                            DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                        ),
+                    )
+                    return await self._save_and_finish()
             except Exception as e:
                 _LOGGER.error("Error validating dynamic pricing config: %s", e)
                 errors["base"] = "unknown"
 
-        default_integration = existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL)
-        default_sensor = existing_config.get(CONF_PRICE_SENSOR, "")
-        default_max_price = existing_config.get(CONF_MAX_PRICE_THRESHOLD)
-        default_discharge_price = existing_config.get(CONF_DISCHARGE_PRICE_THRESHOLD)
-        default_forecast = existing_config.get("solar_forecast_sensor", "")
-        default_dp_discharge_control = existing_config.get(CONF_DP_PRICE_DISCHARGE_CONTROL, False)
-        default_margin = existing_config.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-        default_grid_margin = existing_config.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
-        default_negative_price_enabled = existing_config.get(
-            CONF_NEGATIVE_PRICE_CHARGING_ENABLED,
-            DEFAULT_NEGATIVE_PRICE_CHARGING_ENABLED,
+        form_input = user_input or {}
+        default_integration = form_input.get(
+            CONF_PRICE_INTEGRATION_TYPE,
+            existing_config.get(CONF_PRICE_INTEGRATION_TYPE, PRICE_INTEGRATION_NORDPOOL),
         )
-        default_smart_predischarge = existing_config.get(
-            CONF_SMART_PREDISCHARGE_ENABLED, DEFAULT_SMART_PREDISCHARGE_ENABLED
+        default_sensor = form_input.get(
+            CONF_PRICE_SENSOR, existing_config.get(CONF_PRICE_SENSOR, "")
         )
-        default_negative_threshold = existing_config.get(
-            CONF_NEGATIVE_INJECTION_THRESHOLD, DEFAULT_NEGATIVE_INJECTION_THRESHOLD
+        default_export_sensor = (
+            form_input.get(CONF_EXPORT_PRICE_SENSOR)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_SENSOR)
         )
-        default_reserve_soc = existing_config.get(
-            CONF_PREDISCHARGE_RESERVE_SOC, DEFAULT_PREDISCHARGE_RESERVE_SOC
+        default_export_type = (
+            form_input.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
+            if user_input is not None
+            else existing_config.get(CONF_EXPORT_PRICE_INTEGRATION_TYPE)
         )
-        default_export_mode = _predischarge_export_defaults(
-            existing_config,
-            default_mode=PREDISCHARGE_EXPORT_MODE_SELF_CONSUMPTION,
-        )[0]
 
         schema_dict: dict = {
             vol.Required(CONF_PRICE_INTEGRATION_TYPE, default=default_integration):
-                SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            PRICE_INTEGRATION_NORDPOOL,
-                            PRICE_INTEGRATION_PVPC,
-                            PRICE_INTEGRATION_CKW,
-                            PRICE_INTEGRATION_EPEX,
-                            PRICE_INTEGRATION_ENTSOE,
-                            PRICE_INTEGRATION_TIBBER,
-                        ],
-                        translation_key="price_integration_type",
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
+                _price_integration_type_selector(),
             # Optional: not used by Tibber, which polls the tibber.get_prices service.
             vol.Optional(CONF_PRICE_SENSOR, default=default_sensor if default_sensor else vol.UNDEFINED):
                 EntitySelector(EntitySelectorConfig(domain="sensor")),
-            vol.Optional(
-                CONF_MAX_PRICE_THRESHOLD,
-                description={"suggested_value": str(default_max_price)} if default_max_price is not None else {}
-            ):
-                TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(
-                CONF_DISCHARGE_PRICE_THRESHOLD,
-                description={"suggested_value": str(default_discharge_price)} if default_discharge_price is not None else {}
-            ):
-                TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Required(CONF_DP_PRICE_DISCHARGE_CONTROL, default=default_dp_discharge_control): bool,
         }
-        if not has_global_sensor:
+        # Clearable: suggested_value pre-fills without voluptuous restoring the
+        # old value when the field is emptied.
+        schema_dict[vol.Optional(
+            CONF_EXPORT_PRICE_SENSOR,
+            description={"suggested_value": default_export_sensor} if default_export_sensor else {},
+        )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+        schema_dict[vol.Optional(
+            CONF_EXPORT_PRICE_INTEGRATION_TYPE,
+            description={"suggested_value": default_export_type} if default_export_type else {},
+        )] = _price_integration_type_selector(_price_integration_export_options())
+        # Always shown: the provider is picked in this same form, so hiding it
+        # until Zonneplan is saved meant a second visit. The engine ignores it
+        # unless the export curve is Zonneplan.
+        schema_dict[vol.Optional(
+            CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+            default=form_input.get(
+                CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                existing_config.get(
+                    CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                    DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED,
+                ),
+            ),
+        )] = BooleanSelector()
+        if not _has_global_forecast_sensor(existing_config):
+            default_forecast = (
+                form_input.get("solar_forecast_sensor")
+                if user_input is not None
+                else existing_config.get("solar_forecast_sensor", "")
+            )
             schema_dict[vol.Optional(
                 "solar_forecast_sensor",
-                description={"suggested_value": default_forecast} if default_forecast else {}
+                description={"suggested_value": default_forecast} if default_forecast else {},
             )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
-        schema_dict[vol.Optional(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, default=default_margin)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=20, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, default=default_grid_margin)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_NEGATIVE_PRICE_CHARGING_ENABLED, default=default_negative_price_enabled)] = bool
-        schema_dict[vol.Optional(CONF_SMART_PREDISCHARGE_ENABLED, default=default_smart_predischarge)] = bool
-        schema_dict[vol.Optional(CONF_NEGATIVE_INJECTION_THRESHOLD, default=default_negative_threshold)] = NumberSelector(
-            NumberSelectorConfig(min=-2, max=2, step=0.001, unit_of_measurement="€/kWh", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_PREDISCHARGE_RESERVE_SOC, default=default_reserve_soc)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
-        mode_field, mode_selector = _predischarge_export_mode_selector(default_export_mode)
-        schema_dict[mode_field] = mode_selector
         return self.async_show_form(
             step_id="dynamic_pricing_config",
             data_schema=vol.Schema(schema_dict),
             errors=errors,
         )
 
-    async def async_step_predischarge_export_limit(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Configure the W limit only for the custom export policy."""
-        if user_input is not None:
-            _mode, export_power = _predischarge_export_from_input(
-                user_input,
-                fallback_mode=PREDISCHARGE_EXPORT_MODE_CUSTOM,
-            )
-            self.config_data[CONF_PREDISCHARGE_EXPORT_MODE] = PREDISCHARGE_EXPORT_MODE_CUSTOM
-            self.config_data[CONF_PREDISCHARGE_MAX_EXPORT_POWER_W] = export_power
-            return await self._save_and_finish()
-
-        export_config = dict(self.config_entry.data)
-        export_config.update(self.config_data)
-        _mode, export_power = _predischarge_export_defaults(
-            export_config,
-            default_mode=PREDISCHARGE_EXPORT_MODE_CUSTOM,
-        )
-        limit_field, limit_selector = _predischarge_export_limit_selector(export_power)
-        return self.async_show_form(
-            step_id="predischarge_export_limit",
-            data_schema=vol.Schema({limit_field: limit_selector}),
-        )
-
     async def async_step_realtime_price_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure real-time price charging mode in options flow."""
-        errors = {}
+        """Configure real-time price charging mode in options flow.
+
+        Only the price sensors live here; the max-price threshold and the
+        price discharge control are dashboard entities writing the same keys.
+        """
+        errors: dict[str, str] = {}
         existing_config = self.config_entry.data
-        has_global_sensor = bool(
-            self.config_entry.data.get(CONF_SOLAR_FORECAST_REMAINING_SENSOR)
-            or self.config_entry.data.get(CONF_SOLAR_FORECAST_SENSOR)
-        )
 
         if user_input is not None:
             try:
                 price_sensor = user_input[CONF_PRICE_SENSOR]
-                price_state = self.hass.states.get(price_sensor)
-                if price_state is None:
+                if self.hass.states.get(price_sensor) is None:
                     errors[CONF_PRICE_SENSOR] = "sensor_not_found"
-
-                if has_global_sensor:
-                    forecast_sensor = self.config_entry.data.get(CONF_SOLAR_FORECAST_SENSOR)
-                else:
-                    forecast_sensor = user_input.get("solar_forecast_sensor")
-                    if forecast_sensor:
-                        forecast_state = self.hass.states.get(forecast_sensor)
-                        if forecast_state is None:
-                            errors["solar_forecast_sensor"] = "sensor_not_found"
-                        else:
-                            unit = forecast_state.attributes.get("unit_of_measurement", "")
-                            if unit not in ["kWh", "Wh"]:
-                                errors["solar_forecast_sensor"] = "invalid_unit"
+                forecast_sensor = _resolve_forecast_sensor(
+                    self.hass, existing_config, user_input, errors
+                )
 
                 if not errors:
-                    max_price_raw = user_input.get(CONF_MAX_PRICE_THRESHOLD)
-                    max_price = float(str(max_price_raw).replace(",", ".")) if max_price_raw else None
-                    avg_sensor = user_input.get(CONF_AVERAGE_PRICE_SENSOR) or None
-
                     self.config_data["enable_predictive_charging"] = True
                     self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_REALTIME_PRICE
                     self.config_data[CONF_PRICE_SENSOR] = price_sensor
-                    self.config_data[CONF_MAX_PRICE_THRESHOLD] = max_price
-                    self.config_data[CONF_AVERAGE_PRICE_SENSOR] = avg_sensor
-                    self.config_data[CONF_RT_PRICE_DISCHARGE_CONTROL] = user_input.get(CONF_RT_PRICE_DISCHARGE_CONTROL, False)
+                    self.config_data[CONF_AVERAGE_PRICE_SENSOR] = user_input.get(CONF_AVERAGE_PRICE_SENSOR) or None
                     self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
                     self.config_data["charging_time_slot"] = None
-                    self.config_data[CONF_PREDICTIVE_SAFETY_MARGIN_KWH] = user_input.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-                    self.config_data[CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT] = user_input.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
                     return await self._save_and_finish()
             except Exception as e:
                 _LOGGER.error("Error validating real-time price config: %s", e)
                 errors["base"] = "unknown"
 
         default_sensor = existing_config.get(CONF_PRICE_SENSOR, "")
-        default_max_price = existing_config.get(CONF_MAX_PRICE_THRESHOLD)
         default_avg_sensor = existing_config.get(CONF_AVERAGE_PRICE_SENSOR, "")
-        default_rt_discharge_control = existing_config.get(CONF_RT_PRICE_DISCHARGE_CONTROL, False)
-        default_forecast = existing_config.get("solar_forecast_sensor", "")
-        default_margin = existing_config.get(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH)
-        default_grid_margin = existing_config.get(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT)
 
         schema_dict: dict = {
             vol.Required(CONF_PRICE_SENSOR, default=default_sensor if default_sensor else vol.UNDEFINED):
                 EntitySelector(EntitySelectorConfig(domain="sensor")),
             vol.Optional(
-                CONF_MAX_PRICE_THRESHOLD,
-                description={"suggested_value": str(default_max_price)} if default_max_price is not None else {}
-            ):
-                TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Optional(
                 CONF_AVERAGE_PRICE_SENSOR,
                 description={"suggested_value": default_avg_sensor} if default_avg_sensor else {}
             ):
                 EntitySelector(EntitySelectorConfig(domain="sensor")),
-            vol.Required(CONF_RT_PRICE_DISCHARGE_CONTROL, default=default_rt_discharge_control): bool,
         }
-        if not has_global_sensor:
+        if not _has_global_forecast_sensor(existing_config):
+            default_forecast = existing_config.get("solar_forecast_sensor", "")
             schema_dict[vol.Optional(
                 "solar_forecast_sensor",
-                description={"suggested_value": default_forecast} if default_forecast else {}
+                description={"suggested_value": default_forecast} if default_forecast else {},
             )] = EntitySelector(EntitySelectorConfig(domain="sensor"))
-        schema_dict[vol.Optional(CONF_PREDICTIVE_SAFETY_MARGIN_KWH, default=default_margin)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=20, step=0.1, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
-        )
-        schema_dict[vol.Optional(CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT, default=default_grid_margin)] = NumberSelector(
-            NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode=NumberSelectorMode.BOX)
-        )
         return self.async_show_form(
             step_id="realtime_price_config",
             data_schema=vol.Schema(schema_dict),

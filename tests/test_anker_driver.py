@@ -275,6 +275,44 @@ async def test_read_telemetry_uses_fc04_for_input_and_inverts_battery_power():
 
 
 @pytest.mark.asyncio
+async def test_read_telemetry_decodes_battery_soh_from_register_10015():
+    client = _fake_client()
+    buf = [0] * 51
+    buf[15] = 92  # SoH at input register 10015
+    client.async_read_input_block = AsyncMock(return_value=buf)
+
+    drv = _driver(client=client)
+    snap = await drv.read_telemetry(["battery_soh"])
+
+    assert snap["battery_soh"] == 92
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_reports_battery_soh_unknown_when_register_10015_is_zero():
+    client = _fake_client()
+    buf = [0] * 51
+    client.async_read_input_block = AsyncMock(return_value=buf)
+
+    drv = _driver(client=client)
+    snap = await drv.read_telemetry(["battery_soh"])
+
+    # Explicit None, not a missing key: the coordinator only overwrites the keys a
+    # snapshot carries, so omitting it would keep the previous reading on screen.
+    assert snap["battery_soh"] is None
+
+
+def test_battery_soh_in_sensor_definitions_for_e5000_and_max_ac():
+    client = _fake_client()
+    drv = _driver(client=client)
+
+    drv._set_product_code("DN7M")
+    assert "battery_soh" in {d["key"] for d in drv.sensor_definitions}
+
+    drv._set_product_code("DMWH")
+    assert "battery_soh" in {d["key"] for d in drv.sensor_definitions}
+
+
+@pytest.mark.asyncio
 async def test_read_telemetry_sums_official_aggregate_pv_registers():
     client = _fake_client()
     # Official range 10000–10050: pv_power at 10002, third-party PV at 10004,
@@ -626,3 +664,64 @@ async def test_read_telemetry_rejects_transient_zero_power_glitch():
     third = await drv.read_telemetry(["battery_power"])
     assert third.get("battery_power") == 0
     assert drv._zero_power_streak == 3
+
+
+@pytest.mark.asyncio
+async def test_dc_coupled_sku_publishes_its_ac_port_beside_pack_power():
+    """Issue #366: on a DC-coupled Solarbank, 10008 is *pack* power — with the
+    MPPTs producing it reads 0 (array passing straight through) while 10012
+    exports the commanded discharge. Reported telemetry satisfies
+    grid_power == battery_power - pv_power, so 10012 is this unit's own AC port
+    and is published as the delivery signal."""
+    client = _fake_client()
+    buf = [0] * 51
+    buf[2], buf[3] = encode_int32(1350)    # 10002 pv_power
+    buf[8], buf[9] = encode_int32(0)       # 10008 pack power: array passes through
+    buf[12], buf[13] = encode_int32(-1350) # 10012 AC port: exporting as commanded
+    client.async_read_input_block = AsyncMock(return_value=buf)
+
+    drv = _driver(client=client)
+    drv._set_product_code("DN7M")
+    snap = await drv.read_telemetry(["battery_power", "grid_power", "solar_power"])
+
+    assert snap["battery_power"] == 0        # pack idle — what excluded the battery
+    assert snap["ac_delivered_power"] == -1350  # ...while the AC port delivers
+    assert "pv_power" in drv.control_dependency_keys
+
+
+@pytest.mark.asyncio
+async def test_grid_passthrough_on_10012_is_not_delivery():
+    """Issue #468: an E5000 with an Anker CT meter read 10012=+1550 W with pack and
+    PV both at 0 and no backup load -- the house grid. Published as delivery it read as a
+    1550 W charge and the fleet ceiling capped the discharge; the unit's own AC
+    contribution is pack minus array, here 0."""
+    client = _fake_client()
+    buf = [0] * 51
+    buf[12], buf[13] = encode_int32(1550)  # 10012: CT grid reading, not this battery
+    client.async_read_input_block = AsyncMock(return_value=buf)
+
+    drv = _driver(client=client)
+    drv._set_product_code("DN7M")
+    snap = await drv.read_telemetry(["battery_power", "grid_power", "solar_power"])
+
+    assert snap["grid_power"] == 1550
+    assert snap["ac_delivered_power"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ac_coupled_sku_publishes_no_ac_port_signal():
+    """An AC family has no DC array, so 10008 is already the AC value and 10012
+    buys the delivery check nothing. Leave the key unset rather than feed the
+    check a value whose meaning is unverified on those SKUs."""
+    client = _fake_client()
+    buf = [0] * 51
+    buf[8], buf[9] = encode_int32(-800)
+    buf[12], buf[13] = encode_int32(-800)
+    client.async_read_input_block = AsyncMock(return_value=buf)
+
+    drv = _driver(client=client)
+    drv._set_product_code("DMWH")
+    snap = await drv.read_telemetry(["battery_power", "grid_power"])
+
+    assert snap["battery_power"] == 800  # invert:True -> +charge convention
+    assert "ac_delivered_power" not in snap

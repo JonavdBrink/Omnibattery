@@ -29,11 +29,12 @@ class _Coord:
         self.data = {"battery_soc": soc, "battery_total_energy": capacity_kwh}
 
 
-def _ctrl(coords, decision):
+def _ctrl(coords, decision, floor=0.0):
     return SimpleNamespace(
         coordinators=list(coords),
         _last_decision_data=decision,
-        _predictive_grid_charge_margin_pct=0.0,
+        _predictive_min_soc_floor=floor,
+        _predictive_min_soc_floor_enabled=floor > 0,
     )
 
 
@@ -79,14 +80,6 @@ def test_precomputed_planned_charge_keeps_target_in_sync_with_scheduler():
     assert targets[c] == 95.0
 
 
-def test_grid_charge_margin_applies_to_fallback_target_calculation():
-    c = _Coord("c", 20.0, 5.0, max_soc=100)
-    ctrl = _ctrl([c], {"energy_deficit_kwh": 2.0})
-    ctrl._predictive_grid_charge_margin_pct = 50.0
-    targets = _compute(ctrl)
-    assert targets[c] == 80.0
-
-
 def test_target_never_below_current_soc():
     # No deficit (covered by solar/storage) → target stays at current SOC,
     # not driven down.
@@ -118,6 +111,30 @@ def test_proportional_split_favors_larger_gap():
     low_added = targets[low] - 20.0
     high_added = targets[high] - 80.0
     assert low_added > high_added > 0
+
+
+def test_floor_active_stops_at_the_floor_not_at_the_proportional_share():
+    # Three 5.12 kWh batteries at 14/15/15%, floor 20%, floor deficit 0.82 kWh.
+    # Split by gap-to-ceiling that is only ~+5.4% each, so every battery stopped
+    # short of the floor and the slot re-triggered within the hour.
+    a = _Coord("a", 14.0, 5.12)
+    b = _Coord("b", 15.0, 5.12)
+    c = _Coord("c", 15.0, 5.12)
+    decision = {"energy_deficit_kwh": 0.8192, "floor_active": True}
+
+    targets = _compute(_ctrl([a, b, c], decision, floor=20.0))
+
+    assert all(targets[coord] >= 20.0 for coord in (a, b, c))
+
+
+def test_floor_clamp_does_not_apply_when_the_floor_is_not_the_driver():
+    # Ordinary deficit charge: the floor must not raise the stop target.
+    c = _Coord("c", 14.0, 5.12)
+    decision = {"energy_deficit_kwh": 0.2, "floor_active": False}
+
+    targets = _compute(_ctrl([c], decision, floor=20.0))
+
+    assert targets[c] < 20.0
 
 
 def test_returns_none_without_decision_data():

@@ -28,6 +28,7 @@ from ..infra.modbus_client import decode_registers
 from .base import (
     BatteryDriver,
     DriverCapabilities,
+    DELIVERED_AC_POWER_KEY,
     ReadGroup,
     SetpointResult,
     TelemetrySnapshot,
@@ -42,6 +43,7 @@ _ADDR_POWER_SETPOINT = 10071
 _ADDR_CHARGE_SOC_LIMIT = 60000
 _ADDR_DISCHARGE_SOC_LIMIT = 60001
 _ADDR_BATTERY_SOC = 10014
+_ADDR_BATTERY_SOH = 10015
 _ADDR_PV_POWER = 10002
 _ADDR_THIRD_PARTY_PV_POWER = 10004
 _ADDR_PV_TOTAL_GENERATION = 10018
@@ -113,7 +115,9 @@ _FIELD_SPECS: list[dict] = [
      "data_type": "int32", "count": 2, "invert": True},
     {"key": "grid_power", "address": 10012, "register_type": "input",
      "data_type": "int32", "count": 2},
-    {"key": "battery_soc", "address": 10014, "register_type": "input",
+    {"key": "battery_soc", "address": _ADDR_BATTERY_SOC, "register_type": "input",
+     "data_type": "uint16", "count": 1},
+    {"key": "battery_soh", "address": _ADDR_BATTERY_SOH, "register_type": "input",
      "data_type": "uint16", "count": 1},
     # The official map exposes aggregate PV only. PV total is the PCS value;
     # third_party_pv_power is an additional source that must be added to it.
@@ -147,6 +151,9 @@ SENSOR_DEFINITIONS: list[dict] = [
     {"key": "battery_soc", "name": "Battery SOC", "unit": "%",
      "device_class": "battery", "state_class": "measurement", "scale": 1, "precision": 0,
      "scan_interval": "medium", "enabled_by_default": True},
+    {"key": "battery_soh", "name": "Battery State of Health (SoH)", "unit": "%",
+     "device_class": None, "state_class": "measurement", "scale": 1, "precision": 0,
+     "icon": "mdi:battery-heart", "enabled_by_default": True},
     {"key": "battery_power", "name": "Battery Power", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
      "scan_interval": "high", "enabled_by_default": True},
@@ -574,6 +581,14 @@ class AnkerModbusDriver(BatteryDriver):
                     snapshot[field["key"]] = capped or _HW_MAX_POWER_W
                     self._dynamic_max_discharge_w = snapshot[field["key"]]
 
+        # Register 10015 is shared across Solarbank SKUs but only field-verified on
+        # DMWH. Units that do not implement SoH may answer 0 instead of omitting the
+        # field; treat that as unknown rather than a dead battery. None (not a pop)
+        # so the coordinator clears the sensor: it only writes the keys the snapshot
+        # carries, so dropping the key would freeze the last non-zero reading.
+        if snapshot.get("battery_soh") == 0:
+            snapshot["battery_soh"] = None
+
         pv_power = snapshot.get("pv_power")
         third_party_pv_power = snapshot.get("third_party_pv_power")
         if self.has_independent_pv and (
@@ -636,6 +651,21 @@ class AnkerModbusDriver(BatteryDriver):
             snapshot["ac_power"] = -battery_power
         else:
             snapshot.pop("ac_power", None)
+        # On a DC-coupled SKU 10008 is pack power, so with the MPPTs producing it
+        # reads "charging" (or 0, passing the array straight through) while the AC
+        # port exports the commanded discharge — issue #366. The unit's own AC
+        # contribution is pack minus array, in the same +in/-out convention.
+        # Not 10012: it matched that on the #366 hardware, but with an Anker CT
+        # meter attached it tracks the house grid — an E5000 read 10012=1550 W
+        # with pack and PV at 0 and no backup load, which the fleet
+        # reconstruction took for a 1550 W charge and capped the discharge (#468). The AC families have no DC array, so
+        # 10008 is already the AC value there.
+        if (
+            self.has_independent_pv
+            and isinstance(battery_power, (int, float))
+            and isinstance(pv_power, (int, float))
+        ):
+            snapshot[DELIVERED_AC_POWER_KEY] = int(battery_power) - int(pv_power)
         temperature = snapshot.get("temperature")
         if isinstance(temperature, (int, float)):
             snapshot["internal_temperature"] = temperature
@@ -764,6 +794,9 @@ class AnkerModbusDriver(BatteryDriver):
             "battery_power",
             "battery_status",
             "temperature",
+            # AC-side delivery = pack - array (#366, #468). Already in the
+            # 10000-10050 batch, so keeping it costs no extra read.
+            "pv_power",
         })
 
     async def apply_config(

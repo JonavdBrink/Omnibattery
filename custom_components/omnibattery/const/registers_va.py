@@ -460,13 +460,23 @@ NUMBER_DEFINITIONS_VA = [
 # Venus A/D couple several battery packs and fill them in sequence, so the
 # aggregate SOC at 32104 can read 100 % while a later pack is still empty. Each
 # pack publishes its own SOC on a stride-100 layout — 34000 + 100·(n−1), SOC at
-# offset +2 — in deci-percent (the aggregate is whole percent). The six
-# addresses are 100 registers apart, so no block read applies (REGISTER_BLOCKS
-# never pads gaps, issue #361) and each costs its own frame: polled at "low"
-# because a pack SOC moves ~0.1 %/min in absorption and a handover takes
-# minutes. Slots this installation does not have are dropped by the driver's
-# start-up probe (MarstekModbusDriver._learn_packs).
-PACK_SOC_KEYS = tuple(f"battery_soc_pack_{n}" for n in range(1, 7))
+# offset +2 — in deci-percent (the aggregate is whole percent). The addresses
+# are 100 registers apart, so no block read applies (REGISTER_BLOCKS never pads
+# gaps, issue #361) and each costs its own frame: polled at "low" because a pack
+# SOC moves ~0.1 %/min in absorption and a handover takes minutes. Slots this
+# installation does not have are dropped by the driver's start-up probe
+# (MarstekModbusDriver._learn_packs), so an unused slot costs three probe reads
+# once and nothing after that.
+#
+# Seven slots, not the six of #350: issue #415 reports a seven-pack Venus D. A
+# slot missing from this tuple is not polled at all, so its SOC never reaches
+# the min() the charge ceiling and discharge floor are taken on. 34602 is
+# confirmed on that installation (#415): it tracks pack 7 independently, and the
+# stride is not an artefact — adding a pack renumbers from the top, so the new
+# pack takes slot 1 and the old six shift up to 34102–34602, addresses included.
+# A slot beyond the last populated one still rests on the probe: three reads
+# once, then off the schedule for good if nothing answers.
+PACK_SOC_KEYS = tuple(f"battery_soc_pack_{n}" for n in range(1, 8))
 
 SENSOR_DEFINITIONS_VA.extend(
     {
@@ -484,3 +494,97 @@ SENSOR_DEFINITIONS_VA.extend(
     }
     for n, key in enumerate(PACK_SOC_KEYS, start=1)
 )
+
+# --- per-pack cell voltage (issue #439) --------------------------------------
+# 37007/37008 are not a device-wide max/min: they are pack 1's, and only pack
+# 1's. Firmware v150 confirms it — 37007 and 34005 read through the same source
+# pointer 0x20014FC4, 37008 and 34006 through 0x20014FC6 — and #415 proved it
+# twice on hardware: adding a seventh pack renumbered the slots from the top and
+# the registers followed the *new* pack 1, while the taper latched the instant
+# pack 1 crossed 3.48 V rather than when the battery did.
+#
+# That makes the single "Cell Delta" a pack-1 reading wearing a whole-battery
+# label. A Venus A/D charges one pack at a time (register 32111 is the active
+# pack index) and rotates every 7-50 minutes, so pack 1 is the pack under load
+# in only about one interval in six; the rest of the time the delta describes a
+# resting pack. Reading each pack's own pair — offsets +5 and +6 on the same
+# stride-100 block the SOC at +2 already uses — is what makes the number
+# attributable, and it is cheap: 14 registers, not the 112 of individual cells.
+#
+# The entities are off by default, because fourteen extra diagnostic rows per
+# battery is clutter for the many owners who will never plot them. The *reads*
+# are not: the balance monitor needs these values to attribute a delta at all, so
+# the driver declares them as balance dependencies and they keep polling with
+# their entities disabled — the same split the pack SOCs and 37007/37008 already
+# use. A user who wants the per-pack numbers on a chart enables the entities; the
+# delta is right either way.
+#
+# One frame per pack, not two: each pair is adjacent, so it is block-read
+# (REGISTER_BLOCKS_VA_PACK_CELLS below) at "low". On a four-pack Venus D that is
+# four extra frames per 30 s cycle, ~600 ms of a bus with one TCP slot.
+#
+# Pack 1's pair is firmware-confirmed (the shared pointers above). Packs 2-7 are
+# the same stride the SOC uses at +2, which is confirmed on hardware up to
+# 34602 (#415), applied to offsets +5/+6 — reasoned, not read. Nothing guards
+# that beyond what the hardware itself says: a slot whose registers do not answer
+# is written off by the start-up probe after three tries, exactly like a slot
+# with no pack in it.
+PACK_MAX_CELL_KEYS = tuple(f"max_cell_voltage_pack_{n}" for n in range(1, 8))
+PACK_MIN_CELL_KEYS = tuple(f"min_cell_voltage_pack_{n}" for n in range(1, 8))
+
+SENSOR_DEFINITIONS_VA.extend(
+    {
+        "name": f"{label} Cell Voltage Pack {n}",
+        "register": 34000 + 100 * (n - 1) + offset,
+        "scale": 0.001,
+        "unit": "V",
+        "device_class": "voltage",
+        "state_class": "measurement",
+        "key": key,
+        "enabled_by_default": False,
+        "data_type": "int16",
+        "precision": 3,
+        "scan_interval": "low",
+    }
+    for label, offset, keys in (
+        ("Max", 5, PACK_MAX_CELL_KEYS),
+        ("Min", 6, PACK_MIN_CELL_KEYS),
+    )
+    for n, key in enumerate(keys, start=1)
+)
+
+# One request per pack: max/min sit next to each other, so the pair costs a
+# single frame instead of two. Venus A/D only — a v3 shares the entity map but
+# has no 34000-block, and an unconditional block group would burn a failing read
+# on it every cycle. An absent slot's group is pruned by the SOC probe along with
+# its keys.
+REGISTER_BLOCKS_VA_PACK_CELLS = [
+    {
+        "start": 34000 + 100 * (n - 1) + 5,
+        "count": 2,
+        "scan_interval": "low",
+        "members": [
+            {"key": f"max_cell_voltage_pack_{n}", "offset": 0, "count": 1, "data_type": "int16"},
+            {"key": f"min_cell_voltage_pack_{n}", "offset": 1, "count": 1, "data_type": "int16"},
+        ],
+    }
+    for n in range(1, 8)
+]
+
+# --- BMS online-pack mask (issue #526) ---------------------------------------
+# 32110 carries one bit per pack slot, bit n = slot n+1, and follows the hardware
+# at runtime: pulling pack 7 off a seven-pack Venus D took it from 127 to 63
+# (and 32109, the pack count, from 7 to 6). The start-up probe cannot see that —
+# a removed slot keeps reading a flat 0, which min(pack_soc) then takes as an
+# empty battery — so the driver lets this mask decide which slots are polled.
+# Polled as an internal key, with no entity: it only feeds the driver.
+# Confirmed on Venus D (#526); untested on Venus A, where a read that never
+# answers just leaves the probe in charge as before.
+PACK_ONLINE_MASK_KEY = "pack_online_mask"
+PACK_ONLINE_MASK_DEFINITION = {
+    "name": "BMS Online Pack Mask",
+    "register": 32110,
+    "key": PACK_ONLINE_MASK_KEY,
+    "data_type": "uint16",
+    "scan_interval": "low",
+}

@@ -50,6 +50,8 @@ async def async_setup_entry(
         entities.append(PredictiveChargingStatusSensor(hass, entry, controller))
         if controller.predictive_charging_mode == PREDICTIVE_MODE_DYNAMIC_PRICING:
             entities.append(CurtailmentStatusSensor(hass, entry, controller))
+            entities.append(SurplusPriceHoldSensor(hass, entry, controller))
+            entities.append(DischargeReserveSensor(hass, entry, controller))
 
     # Add capacity protection status sensor (system-level, when configured, regardless of enabled state)
     if controller and CONF_CAPACITY_PROTECTION_ENABLED in entry.data:
@@ -236,6 +238,118 @@ class CapacityProtectionStatusSensor(BinarySensorEntity):
         }
 
 
+class SurplusPriceHoldSensor(BinarySensorEntity):
+    """Diagnostic state for price-aware solar surplus absorption.
+
+    ``on`` means the battery is deliberately not absorbing surplus because a
+    cheaper feed-in window is still ahead.
+    """
+
+    _unrecorded_attributes = frozenset({"selected_slots"})
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.controller = controller
+        self._attr_has_entity_name = True
+        self._attr_translation_key = "surplus_price_hold_status"
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}surplus_price_hold_status"
+        self.entity_id = system_entity_id("binary_sensor", "surplus_price_hold_status")
+        self._attr_device_class = "running"
+        self._attr_icon = "mdi:transmission-tower-export"
+        self._attr_should_poll = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _status(self) -> dict:
+        manager = getattr(self.controller, "_surplus_hold_mgr", None)
+        return manager.get_status() if manager is not None else {}
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._status().get("hold", False))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = {
+            "enabled": bool(
+                getattr(self.controller, "surplus_price_hold_enabled", False)
+            ),
+            "min_saving": getattr(self.controller, "surplus_hold_min_saving", None),
+            "export_price_source": (
+                getattr(self.controller, "export_price_sensor", None)
+                or "import_fallback"
+            ),
+        }
+        attrs.update(self._status())
+        return attrs
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }
+
+
+class DischargeReserveSensor(BinarySensorEntity):
+    """Diagnostic state for the price-aware discharge reserve.
+
+    ``on`` means part of the stored energy is being kept back because a dearer
+    hour is still ahead today. The reserve itself is published as
+    ``reserve_soc_pct``: everything above it stays available right now.
+    """
+
+    _unrecorded_attributes = frozenset({"reserved_slots", "claims"})
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.controller = controller
+        self._attr_has_entity_name = True
+        self._attr_translation_key = "discharge_reserve_status"
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}discharge_reserve_status"
+        self.entity_id = system_entity_id("binary_sensor", "discharge_reserve_status")
+        self._attr_device_class = "running"
+        self._attr_icon = "mdi:battery-lock"
+        self._attr_should_poll = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _status(self) -> dict:
+        manager = getattr(self.controller, "_discharge_reserve_mgr", None)
+        return manager.get_status() if manager is not None else {}
+
+    @property
+    def is_on(self) -> bool:
+        try:
+            return float(self._status().get("reserve_soc_pct", 0.0) or 0.0) > 0.0
+        except (TypeError, ValueError):
+            return False
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = {
+            "enabled": bool(
+                getattr(self.controller, "discharge_reserve_enabled", False)
+            ),
+            "min_saving": getattr(
+                self.controller, "discharge_reserve_min_saving", None
+            ),
+        }
+        attrs.update(self._status())
+        return attrs
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }
+
+
 class CurtailmentStatusSensor(BinarySensorEntity):
     """Diagnostic state for the dynamic-pricing smart pre-discharge planner."""
 
@@ -401,11 +515,13 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
         "cutoff_energy_kwh", "effective_min_soc", "avg_consumption_kwh",
         "total_available_kwh", "energy_deficit_kwh", "solar_forecast_kwh",
         "solar_surplus_kwh", "planned_grid_charge_kwh",
+        "excluded_demand_claim_kwh", "solar_available_to_battery_kwh",
         "consumption_scope", "daily_avg_consumption_kwh", "consumed_today_kwh",
         "remaining_consumption_kwh", "remaining_solar_kwh",
         "consumption_rate_kwh_h", "consumption_accumulator_source",
         "energy_deadlines", "slot_energy_targets_kwh", "slot_deadlines",
         "decision_reason", "solar_forecast_periods",
+        "energy_horizon_end", "overnight_consumption_kwh",
     })
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
@@ -477,6 +593,7 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
             attrs["solar_forecast_source"] = self.controller.solar_forecast_source
 
         attrs["max_contracted_power"] = self.controller.max_contracted_power
+        attrs["icp_excluded_protection_w"] = round(getattr(self.controller, "_icp_excluded_protection_w", 0.0))
 
         # Home consumption diagnostics: home power is always derived
         # (grid + battery AC + solar); the household sensor was removed.
@@ -569,7 +686,19 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
                     "solar_remaining_effective_kwh"
                 ),
                 "solar_surplus_kwh": decision.get("solar_surplus_kwh"),
+                "excluded_demand_claim_kwh": _chronological_value(
+                    "excluded_demand_claim_kwh"
+                ),
+                "solar_available_to_battery_kwh": _chronological_value(
+                    "solar_available_to_battery_kwh"
+                ),
                 "decision_reason": decision.get("reason"),
+                "energy_horizon_end": (
+                    decision["energy_horizon_end"].isoformat()
+                    if isinstance(decision.get("energy_horizon_end"), datetime)
+                    else None
+                ),
+                "overnight_consumption_kwh": decision.get("overnight_consumption_kwh"),
                 "chronological_planning_active": chronological_active,
                 "chronological_source": _chronological_value("chronological_source"),
                 "solar_timeline_source": _chronological_value(

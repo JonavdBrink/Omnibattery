@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
 
+from .pack_soc import control_vmax
 from ..const import (
     CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED,
     DEFAULT_FULL_CHARGE_VOLTAGE_TAPER_ENABLED,
@@ -385,6 +386,9 @@ class MaxSocChargeManager:
         if active:
             return True
 
+        # Deliberately the raw register, not control_vmax: True here means
+        # "stay charge-eligible", so a pack-1-only top cell (issue #415) must
+        # keep the charge alive rather than qualify it away.
         try:
             vmax = float((coordinator.data or {}).get("max_cell_voltage"))
         except (TypeError, ValueError):
@@ -396,14 +400,8 @@ class MaxSocChargeManager:
         if not self._taper_applies(coordinator):
             return False
 
-        data = coordinator.data or {}
-        vmax = data.get("max_cell_voltage")
-        try:
-            if vmax is not None and float(vmax) >= NORMAL_BALANCE_TAPER_CELL_VOLTAGE:
-                return True
-        except (TypeError, ValueError):
-            return False
-        return False
+        vmax = control_vmax(coordinator)
+        return vmax is not None and vmax >= NORMAL_BALANCE_TAPER_CELL_VOLTAGE
 
     @staticmethod
     def _bms_cut_signature(coordinator, data: dict) -> bool:
@@ -428,6 +426,36 @@ class MaxSocChargeManager:
             )
         except (TypeError, ValueError):
             return False
+
+    def _recal_accept_sustained(self, coordinator, data: dict) -> bool:
+        """Return True once charge has been accepted for N consecutive cycles.
+
+        A single accepted sample is not proof the battery is filling: a v3 BMS
+        at its cutoff can flap Charge ↔ Standby every few seconds, and resetting
+        the cutoff counter on each Charge sample kept it from ever latching.
+        Refusals clear the streak; idle cycles freeze it.
+        """
+        streaks = self._controller.__dict__.setdefault(
+            "_normal_balance_recal_accept_count", {}
+        )
+        power = data.get("battery_power")
+        try:
+            accepting = (
+                power is not None and float(power) > NORMAL_BALANCE_RECAL_CUTOFF_POWER_W
+            )
+        except (TypeError, ValueError):
+            accepting = False
+        if self._bms_cut_signature(coordinator, data):
+            streaks.pop(coordinator, None)
+            return False
+        if not accepting:
+            return False
+        count = streaks.get(coordinator, 0) + 1
+        if count >= NORMAL_BALANCE_RECAL_CUTOFF_CYCLES:
+            streaks.pop(coordinator, None)
+            return True
+        streaks[coordinator] = count
+        return False
 
     def _compute_recal_override(self, coordinator, vmax_f: float, soc) -> bool:
         """Decide whether to keep charging past the top-voltage threshold to recalibrate SOC.
@@ -478,6 +506,7 @@ class MaxSocChargeManager:
                 c._normal_balance_recal_cutoff_count.pop(coordinator, None)
                 return False
 
+            accept_sustained = self._recal_accept_sustained(coordinator, data)
             if self._bms_cut_signature(coordinator, data):
                 count = c._normal_balance_recal_cutoff_count.get(coordinator, 0) + 1
                 c._normal_balance_recal_cutoff_count[coordinator] = count
@@ -492,18 +521,9 @@ class MaxSocChargeManager:
                         soc,
                     )
                     return False
-            else:
-                power = data.get("battery_power")
-                try:
-                    accepting = (
-                        power is not None
-                        and float(power) > NORMAL_BALANCE_RECAL_CUTOFF_POWER_W
-                    )
-                except (TypeError, ValueError):
-                    accepting = False
-                if accepting:
-                    # The retry is still in progress; only a new refusal can end it.
-                    c._normal_balance_recal_cutoff_count.pop(coordinator, None)
+            elif accept_sustained:
+                # The retry is still in progress; only a new refusal can end it.
+                c._normal_balance_recal_cutoff_count.pop(coordinator, None)
             return True
 
         if soc is None or soc >= NORMAL_BALANCE_RECAL_SOC_THRESHOLD:
@@ -513,6 +533,7 @@ class MaxSocChargeManager:
         if c._normal_balance_recal_latched.get(coordinator):
             return False
 
+        accept_sustained = self._recal_accept_sustained(coordinator, data)
         if self._bms_cut_signature(coordinator, data):
             count = c._normal_balance_recal_cutoff_count.get(coordinator, 0) + 1
             c._normal_balance_recal_cutoff_count[coordinator] = count
@@ -544,16 +565,8 @@ class MaxSocChargeManager:
                     )
                 return False
         else:
-            power = data.get("battery_power")
-            try:
-                accepting = (
-                    power is not None
-                    and float(power) > NORMAL_BALANCE_RECAL_CUTOFF_POWER_W
-                )
-            except (TypeError, ValueError):
-                accepting = False
-            if accepting:
-                # The battery is accepting charge, so it is genuinely not full.
+            if accept_sustained:
+                # Sustained acceptance: the battery is genuinely not full.
                 c._normal_balance_recal_cutoff_count.pop(coordinator, None)
                 c._normal_balance_recal_first_cutoff_voltage.pop(coordinator, None)
             # When idle or not commanded, freeze the counter: neither increment
@@ -570,6 +583,7 @@ class MaxSocChargeManager:
         c._normal_balance_recal_retry_pending.pop(coordinator, None)
         c._normal_balance_recal_retry_active.pop(coordinator, None)
         c._normal_balance_recal_first_cutoff_voltage.pop(coordinator, None)
+        c.__dict__.get("_normal_balance_recal_accept_count", {}).pop(coordinator, None)
 
     def refresh_blocks(self) -> None:
         """Update normal high-SOC charge protection blockers.
@@ -614,21 +628,12 @@ class MaxSocChargeManager:
                 continue
 
             in_zone = self._zone_active(coordinator)
-            vmax_raw = (coordinator.data or {}).get("max_cell_voltage")
-            try:
-                vmax_now = float(vmax_raw) if vmax_raw is not None else None
-            except (TypeError, ValueError):
-                vmax_now = None
-            vmax = data.get("max_cell_voltage")
+            vmax_f = control_vmax(coordinator)
             current_soc = data.get("battery_soc")
-            try:
-                vmax_f = float(vmax) if vmax is not None else None
-            except (TypeError, ValueError):
-                vmax_f = None
             # Hysteresis: only clear the taper latch once the cell has dropped to the
             # exit threshold (below entry), not the moment it slips under 3.48 V at
             # low charge power. This prevents full-power ↔ tapered-power oscillation.
-            if not in_zone and (vmax_now is None or vmax_now < NORMAL_BALANCE_TAPER_EXIT_CELL_VOLTAGE):
+            if not in_zone and (vmax_f is None or vmax_f < NORMAL_BALANCE_TAPER_EXIT_CELL_VOLTAGE):
                 c._normal_balance_voltage_tapered.pop(coordinator, None)
             if not in_zone:
                 # Battery has dropped out of the top zone: end any recal session so
@@ -764,23 +769,18 @@ class MaxSocChargeManager:
         if not self._taper_applies(coordinator):
             return limit
 
-        data = coordinator.data or {}
-        max_cell_voltage = data.get("max_cell_voltage")
+        vmax = control_vmax(coordinator)
         voltage_tapered = c._normal_balance_voltage_tapered
         voltage_taper_latched = voltage_tapered.get(coordinator, False)
-        if max_cell_voltage is not None:
-            try:
-                max_cell_voltage_f = float(max_cell_voltage)
-                if max_cell_voltage_f >= NORMAL_BALANCE_TAPER_CELL_VOLTAGE:
-                    voltage_taper_latched = True
-                    voltage_tapered[coordinator] = True
-                elif max_cell_voltage_f < NORMAL_BALANCE_TAPER_EXIT_CELL_VOLTAGE:
-                    voltage_tapered.pop(coordinator, None)
-                    voltage_taper_latched = False
-                if voltage_taper_latched:
-                    limit = min(limit, NORMAL_BALANCE_CHARGE_POWER_W)
-            except (TypeError, ValueError):
-                pass
+        if vmax is not None:
+            if vmax >= NORMAL_BALANCE_TAPER_CELL_VOLTAGE:
+                voltage_taper_latched = True
+                voltage_tapered[coordinator] = True
+            elif vmax < NORMAL_BALANCE_TAPER_EXIT_CELL_VOLTAGE:
+                voltage_tapered.pop(coordinator, None)
+                voltage_taper_latched = False
+            if voltage_taper_latched:
+                limit = min(limit, NORMAL_BALANCE_CHARGE_POWER_W)
 
         return limit
 

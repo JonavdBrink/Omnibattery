@@ -40,6 +40,12 @@ DEFAULT_SLAVE_ID = 1
 CONF_SERIAL_PORT = "serial_port"
 SERIAL_BAUDRATE = 115200
 
+# Per-battery opt-in: the Modbus TCP connection lands on an RS485 gateway
+# (Elfin EW11 and friends) instead of the battery's own TCP server, so the
+# inter-message wait that server imposes does not apply (issue #411). Drops the
+# spacing to MESSAGE_WAIT_MS_RS485_GATEWAY for any Marstek firmware version.
+CONF_RS485_GATEWAY = "rs485_gateway"
+
 # Maximum power (W) per battery version — used by config_flow to set slider limits
 MAX_POWER_BY_VERSION = {
     "v2": 2500,
@@ -225,22 +231,26 @@ MAX_TIME_SLOTS = 8
 # Default base consumption fallback (kWh/day)
 DEFAULT_BASE_CONSUMPTION_KWH = 5.0  # Fallback when no consumption history available
 
-# Predictive charging / anti-curtailment safety margin
+# Predictive charging / anti-curtailment safety margin.
+# How much the solar forecast is distrusted: this many kWh are subtracted from
+# it before predictive charging decides whether to charge, and the same margin
+# reserves anti-curtailment headroom in Dynamic Pricing. 0.0 is the sentinel
+# for "no margin" and also the fallback when the fleet's capacity is unknown
+# (see default_predictive_safety_margin_kwh() below, which the config flow
+# uses to size the default for *new* entries only).
 CONF_PREDICTIVE_SAFETY_MARGIN_KWH = "predictive_safety_margin_kwh"
-DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH = 0.0  # kWh buffer; 0 = no margin
+DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH = 0.0
 
-# Predictive charging grid-charge margin
-# Extra % charged from grid on top of the solar-deficit, to hedge against
-# optimistic solar forecasts / worse-than-expected weather. 0 = no margin.
-# Capped so the charge never exceeds the gap to max SOC.
+# Legacy key, kept only for the v13->v14 migration that drops it. It inflated
+# the already-computed deficit, so it scaled inversely to the solar risk it
+# claimed to hedge. Do not read/write it elsewhere.
 CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT = "predictive_grid_charge_margin_pct"
-DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT = 0.0
 
 # Guaranteed minimum SOC floor (#417)
 # The whole-day energy balance can read zero deficit on a solar-positive day,
 # yet the battery still hits the hardware floor in the morning before solar
 # ramps up. This forces a charge sized to reach the floor SOC regardless of the
-# daily balance. 0 = disabled.
+# daily balance. Disabled via the CONF_ENABLE_MIN_SOC_FLOOR switch.
 CONF_PREDICTIVE_MIN_SOC_FLOOR = "predictive_min_soc_floor"
 DEFAULT_PREDICTIVE_MIN_SOC_FLOOR = 20.0
 CONF_ENABLE_MIN_SOC_FLOOR = "enable_min_soc_floor"
@@ -324,6 +334,7 @@ NORMAL_BALANCE_RECAL_SOC_THRESHOLD = 99        # %: below this, make one best-ef
 NORMAL_BALANCE_RECAL_CUTOFF_POWER_W = 10       # W: charge collapsed (BMS terminated)
 NORMAL_BALANCE_RECAL_CUTOFF_CYCLES = 5         # consecutive cycles to confirm the BMS cutoff
 NORMAL_BALANCE_RECAL_INVERTER_STANDBY = 1      # inverter_state raw value for Standby
+INVERTER_STATE_AC_BYPASS = 6                  # inverter_state raw value for Bypass (grid passed through to the backup port)
 # After a cutoff above the pause voltage, allow one extra 200 W charge when the
 # cell has relaxed to this voltage.  The retry is deliberately one-shot.
 NORMAL_BALANCE_RECAL_RETRY_CELL_VOLTAGE = 3.57
@@ -396,6 +407,22 @@ SLOW_SENSOR_WARNING_INTERVAL_S = 10.0
 # shorten the promised tolerance.
 MAX_SENSOR_STALE_S = 65.0
 
+# How long the main grid sensor may go without publishing anything before a
+# Repairs issue is raised. Past MAX_SENSOR_STALE_S the loop already stops
+# integrating P/D, so it simply holds the last command for as long as the
+# silence lasts - bounded by the SOC blockers, not by time. That is silent
+# today: a sensor frozen on a valid value logs nothing at all, and an
+# unavailable one only logs at debug. Long enough to ride out a restart or a
+# brief integration reload, short enough to catch a wedged P1 bridge or a
+# template sensor whose inputs stopped moving.
+MAIN_SENSOR_DEAD_S = 300.0
+
+# How long a phase sensor must stay unreadable before the degradation becomes a
+# Repairs entry. Long enough that the short gaps absorbed by the discharge hold
+# stay silent, short enough that a genuinely dead sensor is reported the same
+# day.
+PHASE_SENSOR_DEGRADED_REPAIR_S = 300.0
+
 # Consecutive slow main-sensor intervals before the slow-sensor repair is raised.
 # Debouncing prevents a single outage/restart gap from flagging an otherwise fast
 # sensor. Clearing uses SLOW_SENSOR_RECOVERY_INTERVALS instead.
@@ -424,6 +451,12 @@ PRICE_DATA_ISSUE_DELAY_S = 7200.0
 # out a provider outage, short enough to catch a dead sensor the same day.
 FORECAST_DATA_ISSUE_DELAY_S = 7200.0
 
+# How long a configured sensor entity must stay absent from the state machine
+# before a Repairs issue names it (#419). Long enough for the integration that
+# provides it to finish setting up after a restart, short enough that a stale
+# reference the options flow preserved becomes visible the same session.
+MISSING_SENSOR_ISSUE_DELAY_S = 900.0
+
 # A readback at or below this settle latency (seconds,
 # DriverCapabilities.readback_latency_s with actuator_latency_s as fallback)
 # reflects the new command within one poll. Slower telemetry paths skip the
@@ -438,6 +471,24 @@ HOT_PATH_READBACK_MAX_LATENCY_S = 1.5
 # inverter is not excluded before it has had time to engage. A battery that never
 # engages is still caught, just this many seconds later.
 DISCHARGE_ENGAGE_GRACE_S = 30
+
+# Top-of-charge tail: the last stretch before 100% often tapers hard (CC/CV
+# tail current) well before is_battery_full() reports the battery full or
+# tick_bms_cutoff() confirms a cutoff (which needs power <= 10 W *and*
+# Standby). Observed on a Huawei LUNA2000: 48-189 W of a 7000 W command for
+# ~15 minutes while SOC climbed 99% -> 100%, inverter never reporting
+# Standby. That gap was recorded as non-delivery and drove wake nudges
+# (RS485 re-assert) despite SOC genuinely still rising. Matches
+# tick_bms_cutoff's own taper-zone gate so both treat the same SOC band as
+# "possibly tapering".
+HIGH_SOC_CHARGE_TAPER_FLOOR = 99  # %: at/above this, judge charge non-delivery as a possible taper first
+
+# Bound on the exemption above: a battery that gets physically stuck in the
+# 99-100% band, rather than genuinely tapering to completion, must still
+# surface as a fault eventually -- just later than one charging normally
+# through it. Comfortably longer than the ~15-26 minutes observed for a
+# real taper.
+HIGH_SOC_CHARGE_TAPER_GRACE_S = 45 * 60
 
 # Idle-runaway floor: a battery commanded to idle (0 W) that is actually moving
 # more than this many watts has slipped out of RS485 forced mode and is running
@@ -542,6 +593,19 @@ EVENING_REEVAL_HOURS_BEFORE_TEND = 1.5  # Trigger evening re-evaluation 1.5h bef
 EVENING_REEVAL_FALLBACK_HOUR = 16.0     # Fallback trigger hour when T_start was never detected
 EVENING_DEFICIT_THRESHOLD_KWH = 0.3    # Minimum deficit to bother scheduling evening charging
 
+# Excluded-device solar claim re-evaluation: an EV session starting or ending
+# moves how much of the remaining forecast the battery may count on.
+EXCLUDED_DEMAND_REEVAL_KWH = 2.0        # Claim change (either direction) that warrants a re-plan
+EXCLUDED_DEMAND_REEVAL_COOLDOWN_MIN = 15  # Minimum minutes between two claim-driven re-evaluations
+EXCLUDED_DEMAND_REEVAL_MAX_PER_DAY = 4  # Cap on claim-driven re-evaluations per day
+
+# Solar forecast re-evaluation: a provider that revises the remaining forecast
+# during the day invalidates the balance the 00:05 plan was built on.
+SOLAR_FORECAST_REEVAL_KWH = 1.5           # Forecast change (either direction) that warrants a re-plan
+SOLAR_FORECAST_REEVAL_COOLDOWN_MIN = 30   # Minimum minutes between two forecast-driven re-evaluations
+SOLAR_FORECAST_REEVAL_MAX_PER_DAY = 4     # Cap on forecast-driven re-evaluations per day
+SOLAR_FORECAST_DAILY_RETRY_LIMIT = 3      # Deferrals while the forecast sensor still reads zero (last ladder call plans)
+
 # Weekday mapping (mon=0, sun=6, matches datetime.weekday())
 WEEKDAY_MAP = {
     "mon": 0, "tue": 1, "wed": 2, "thu": 3,
@@ -572,6 +636,28 @@ CONF_TARGET_GRID_POWER = "pd_target_grid_power"
 # integral/derivative/smoothing curve. Reuses the deadband, min charge/discharge
 # power, relay min-ON and target-grid-power knobs above; adds only a command delay.
 CONF_NO_PD_MODE_ENABLED = "no_pd_mode_enabled"
+
+# --- Mixed-fleet control (a DC-coupled hybrid beside an AC battery) ----------
+# Which battery serves the house first, and whether it is handed the real
+# quantity directly instead of waiting for the meter to deviate. Both opt-in.
+CONF_PRIMARY_BATTERY = "primary_battery"
+DEFAULT_PRIMARY_BATTERY = ""
+CONF_PRIMARY_FEEDFORWARD_ENABLED = "primary_feedforward_enabled"
+DEFAULT_PRIMARY_FEEDFORWARD_ENABLED = False
+# Which battery is filled first. Empty = follow the day's outlook.
+CONF_CHARGE_PRIORITY = "charge_priority"
+DEFAULT_CHARGE_PRIORITY = ""
+# How far the guards have to want to move the standing command before the
+# deadband/stale shortcuts are skipped to let them. Below this a correction is
+# not worth a write.
+GUARD_PENDING_TOLERANCE_W = 100
+# How clear a surplus has to be before the guard blocks discharge. Wider than
+# meter noise, so a cloud edge does not toggle the battery every cycle; release
+# has no band at all, because by then the house genuinely needs the battery.
+SURPLUS_GUARD_HYSTERESIS_W = 100
+# How far the outlook has to move before the scarce/ample verdict flips. A
+# forecast wanders all day; without this the charge order would follow it.
+SCARCITY_HYSTERESIS_KWH = 2.0
 CONF_NO_PD_COMMAND_DELAY = "no_pd_command_delay"
 CONF_ENABLE_SYSTEM_POWER_LIMITS = "enable_system_power_limits"
 CONF_SYSTEM_MAX_CHARGE_POWER = "system_max_charge_power"
@@ -722,6 +808,27 @@ def effective_system_power(data) -> tuple[int, int]:
         min(discharge_w, discharge_cap) if discharge_cap else discharge_w,
     )
 
+
+def total_battery_capacity_kwh(data) -> float:
+    """Return the sum of each configured battery's rated capacity, in kWh."""
+    batteries = data.get("batteries") or []
+    return sum(float(battery.get("battery_capacity_kwh", 0.0) or 0.0) for battery in batteries)
+
+
+def default_predictive_safety_margin_kwh(data) -> float:
+    """Return ~5% of the fleet's total capacity, or the no-margin sentinel.
+
+    Mirrors ``default_high_price_discharge_max_power()``: the only forecast
+    buffer that means anything is sized to the fleet actually configured.
+    Falls back to ``DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH`` (0.0, no margin)
+    when no battery capacity can be determined yet.
+    """
+    capacity_kwh = total_battery_capacity_kwh(data)
+    if capacity_kwh <= 0:
+        return DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH
+    return round(capacity_kwh * 0.05, 2)
+
+
 # PD Tuning Profiles
 # One-click presets for the PD response-shape parameters (Kp, Kd, max power
 # change). Selecting a profile writes those at once; the "custom" profile leaves
@@ -806,6 +913,9 @@ CONF_DISCHARGE_PRICE_THRESHOLD = "discharge_price_threshold"
 #   expected_discharge_price * round_trip_efficiency - slot_price >= margin
 # so that charging is skipped on days where the intraday spread cannot repay the
 # conversion losses. Applied on top of (not instead of) CONF_MAX_PRICE_THRESHOLD.
+# The discharge side reads the same knob: high-price discharge (#270) adds it to
+# the later buy-back price before a sale qualifies, so a single margin states the
+# same risk appetite in both directions.
 CONF_MIN_ARBITRAGE_MARGIN = "min_arbitrage_margin"
 CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
 
@@ -815,17 +925,90 @@ CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
 CONF_SMART_PREDISCHARGE_ENABLED = "smart_predischarge_enabled"
 CONF_NEGATIVE_INJECTION_THRESHOLD = "negative_injection_threshold"
 CONF_PREDISCHARGE_RESERVE_SOC = "predischarge_reserve_soc"
-CONF_PREDISCHARGE_MAX_EXPORT_POWER_W = "predischarge_max_export_power_w"
 DEFAULT_SMART_PREDISCHARGE_ENABLED = False
 DEFAULT_NEGATIVE_INJECTION_THRESHOLD = 0.0
-DEFAULT_PREDISCHARGE_RESERVE_SOC = 0.0
-DEFAULT_PREDISCHARGE_MAX_EXPORT_POWER_W = 0.0
+# A floor the pre-discharge may not dig below. Zero let anti-curtailment empty
+# the fleet down to each battery's own min SOC to make room for a forecast that
+# may not arrive; 20% is the cheapest insurance and is what a first-time
+# enabler wants. Deliberately not a config-flow field.
+DEFAULT_PREDISCHARGE_RESERVE_SOC = 20.0
 
 # Opportunistic import charging.  This is deliberately separate from
 # CONF_NEGATIVE_INJECTION_THRESHOLD: the latter prices exported solar for
 # anti-curtailment, while this feature reacts to negative grid-import prices.
 CONF_NEGATIVE_PRICE_CHARGING_ENABLED = "negative_price_charging_enabled"
 DEFAULT_NEGATIVE_PRICE_CHARGING_ENABLED = False
+
+# Price-aware solar surplus absorption.  Storing surplus forfeits that slot's
+# feed-in revenue, so on a dynamic contract the same daily charge is cheaper
+# taken in the lowest-priced hours.  Dynamic pricing only, disabled by default.
+CONF_SURPLUS_PRICE_HOLD_ENABLED = "surplus_price_hold_enabled"
+DEFAULT_SURPLUS_PRICE_HOLD_ENABLED = False
+# Advantage (currency/kWh) the cheapest hour still ahead must have over the
+# current one before surplus is held back.  Prevents the hold from chattering
+# on rounding differences across the control cycle.
+CONF_SURPLUS_HOLD_MIN_SAVING = "surplus_hold_min_saving"
+DEFAULT_SURPLUS_HOLD_MIN_SAVING = 0.02
+
+# Price-aware discharge reserve.  The price_discharge blocker asks whether the
+# current hour is cheap; it never asks whether the dearer hours still ahead need
+# the energy that is in the battery.  This reserve raises each battery's
+# discharge floor by the energy those hours claim, and leaves everything above
+# it available for self-consumption now.  Dynamic pricing only, off by default.
+CONF_DISCHARGE_RESERVE_ENABLED = "discharge_reserve_enabled"
+DEFAULT_DISCHARGE_RESERVE_ENABLED = False
+# Advantage (currency/kWh) a later hour must have over the current one before
+# its demand may claim stored energy.  Keeps the floor from chattering on
+# rounding differences, and prices in the wear of the extra cycle.
+CONF_DISCHARGE_RESERVE_MIN_SAVING = "discharge_reserve_min_saving"
+DEFAULT_DISCHARGE_RESERVE_MIN_SAVING = 0.05
+
+# Deliberate export into a price peak (#270).  Sells only energy that a later,
+# dearer hour would otherwise buy from the grid, so the house never ends up
+# importing what it just sold.  Dynamic pricing only, off by default.
+CONF_HIGH_PRICE_DISCHARGE_ENABLED = "high_price_discharge_enabled"
+DEFAULT_HIGH_PRICE_DISCHARGE_ENABLED = False
+CONF_HIGH_PRICE_SURPLUS_EXPORT_ENABLED = "high_price_surplus_export_enabled"
+DEFAULT_HIGH_PRICE_SURPLUS_EXPORT_ENABLED = False
+# Ceiling for the deliberate export, measured net at the connection point.
+# There is no knob for it: it is always the fleet's own discharge power, already
+# narrowed by the system-wide discharge cap (see
+# default_high_price_discharge_max_power() below). A per-feature slider said the
+# same thing as that cap and could only ever disagree with it; a user who wants
+# to export less than the fleet can deliver lowers the system cap, or drives
+# it from an automation. The key is kept only for the v15 migration.
+CONF_HIGH_PRICE_DISCHARGE_MAX_POWER = "high_price_discharge_max_power_w"
+# Last-resort sentinel for a fleet whose discharge power cannot be determined
+# yet (no battery configured). Zero is an invalid activation, not a silent
+# no-op: exporting needs a limit.
+DEFAULT_HIGH_PRICE_DISCHARGE_MAX_POWER = 0.0
+# The per-kWh margin a sale must clear is CONF_MIN_ARBITRAGE_MARGIN, shared with
+# the charge side: the same spread requirement read in the other direction.
+
+
+def default_high_price_discharge_max_power(data) -> float:
+    """Return the fleet's discharge power, or the invalid-configuration sentinel.
+
+    The only export ceiling that ever made sense is the one the fleet can
+    already deliver, so this is no longer a default but the value itself.
+    ``effective_system_power`` has already applied the system-wide discharge
+    cap, which is the knob for exporting less. Falls back to
+    ``DEFAULT_HIGH_PRICE_DISCHARGE_MAX_POWER`` (0.0, invalid per ``_config()``
+    in ``control/high_price_discharge.py``) when no battery is configured yet,
+    which preserves that fail-safe.
+    """
+    _, discharge_w = effective_system_power(data)
+    return float(discharge_w) if discharge_w > 0 else DEFAULT_HIGH_PRICE_DISCHARGE_MAX_POWER
+
+# Optional export/feed-in price curve.  Unset falls back to the import curve,
+# which is both the historical behaviour and correct under net metering.  A
+# separate sensor matters where export is paid differently from import.
+CONF_EXPORT_PRICE_SENSOR = "export_price_sensor"
+CONF_EXPORT_PRICE_INTEGRATION_TYPE = "export_price_integration_type"
+CONF_ZONNEPLAN_EXPORT_BONUS_ENABLED = "zonneplan_export_bonus_enabled"
+DEFAULT_ZONNEPLAN_EXPORT_BONUS_ENABLED = False
+ZONNEPLAN_EXPORT_BONUS_RATE = 0.10
+ZONNEPLAN_EXPORT_BONUS_FIXED_EUR_PER_KWH = 0.02
 
 PREDICTIVE_MODE_TIME_SLOT = "time_slot"
 PREDICTIVE_MODE_DYNAMIC_PRICING = "dynamic_pricing"
@@ -834,8 +1017,11 @@ PREDICTIVE_MODE_REALTIME_PRICE = "realtime_price"
 CONF_AVERAGE_PRICE_SENSOR = "average_price_sensor"
 
 CONF_METER_INVERTED = "meter_inverted"
+# Legacy per-mode keys, kept only for the v12->v13 migration that folds them
+# into CONF_PRICE_DISCHARGE_CONTROL. Do not read/write these elsewhere.
 CONF_DP_PRICE_DISCHARGE_CONTROL = "dp_price_discharge_control"
 CONF_RT_PRICE_DISCHARGE_CONTROL = "rt_price_discharge_control"
+CONF_PRICE_DISCHARGE_CONTROL = "price_discharge_control"
 
 PRICE_INTEGRATION_NORDPOOL = "nordpool"
 PRICE_INTEGRATION_PVPC = "pvpc"
@@ -843,6 +1029,7 @@ PRICE_INTEGRATION_CKW = "ckw"
 PRICE_INTEGRATION_EPEX = "epex"
 PRICE_INTEGRATION_ENTSOE = "entsoe"
 PRICE_INTEGRATION_TIBBER = "tibber"
+PRICE_INTEGRATION_ZONNEPLAN = "zonneplan"
 
 # Tibber and the official Nord Pool integration are service-based rather than
 # forecast-attribute based. How stale either cache may get before a refresh.
@@ -1072,19 +1259,11 @@ CONFIG_NUMBER_DEFINITIONS = [
         "max": 20.0,
         "step": 0.1,
         "unit": "kWh",
-        "default": DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH,
+        # Callable default: the slider must show the same 5%-of-capacity value
+        # the controller falls back to, or a new entry reads 0.0 on the panel
+        # while the engine hedges with something else.
+        "default": default_predictive_safety_margin_kwh,
         "icon": "mdi:solar-power-variant",
-        "condition": CONF_ENABLE_PREDICTIVE_CHARGING,
-    },
-    {
-        "key": CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT,
-        "name": "Predictive Grid Charge Margin",
-        "min": 0.0,
-        "max": 100.0,
-        "step": 5.0,
-        "unit": "%",
-        "default": DEFAULT_PREDICTIVE_GRID_CHARGE_MARGIN_PCT,
-        "icon": "mdi:transmission-tower-import",
         "condition": CONF_ENABLE_PREDICTIVE_CHARGING,
     },
     {
@@ -1099,11 +1278,33 @@ CONFIG_NUMBER_DEFINITIONS = [
         "condition": CONF_ENABLE_PREDICTIVE_CHARGING,
     },
     {
+        "key": CONF_SURPLUS_HOLD_MIN_SAVING,
+        "name": "Surplus Hold Minimum Saving",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.001,
+        "unit": "/kWh",
+        "default": DEFAULT_SURPLUS_HOLD_MIN_SAVING,
+        "icon": "mdi:transmission-tower-export",
+        "condition": CONF_SURPLUS_PRICE_HOLD_ENABLED,
+    },
+    {
+        "key": CONF_DISCHARGE_RESERVE_MIN_SAVING,
+        "name": "Discharge Reserve Minimum Saving",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.001,
+        "unit": "/kWh",
+        "default": DEFAULT_DISCHARGE_RESERVE_MIN_SAVING,
+        "icon": "mdi:cash-minus",
+        "condition": CONF_DISCHARGE_RESERVE_ENABLED,
+    },
+    {
         "key": CONF_HOURLY_BALANCE_TARGET_NET_WH,
         "name": "Hourly Balance Target",
         "min": -2.0,
         "max": 2.0,
-        "step": 0.1,
+        "step": 0.05,
         "unit": "kWh",
         "default": DEFAULT_HOURLY_BALANCE_TARGET_NET_WH,
         "icon": "mdi:scale-balance",
@@ -1125,7 +1326,7 @@ CONFIG_NUMBER_DEFINITIONS = [
         "name": "Hourly Balance Deadband",
         "min": 0.0,
         "max": 0.5,
-        "step": 0.1,
+        "step": 0.05,
         "unit": "kWh",
         "default": DEFAULT_HOURLY_BALANCE_DEADBAND_WH,
         "icon": "mdi:arrow-collapse-horizontal",

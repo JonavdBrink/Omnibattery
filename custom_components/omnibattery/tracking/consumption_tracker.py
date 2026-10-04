@@ -22,15 +22,24 @@ import statistics
 from datetime import date, datetime, time, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Optional
+from zoneinfo import ZoneInfo
+
+from astral import Observer
+from astral.sun import noon as astral_noon, sunrise as astral_sunrise
 
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import DEFAULT_BASE_CONSUMPTION_KWH, DOMAIN
 from ..infra.entity_naming import is_omnibattery_solar_entity
-from ..drivers.base import has_connected_mppt_pv
+from ..drivers.base import DELIVERED_AC_POWER_KEY, has_connected_mppt_pv
 from .backfill import BackfillToken, RecorderBackfillCoordinator, local_day_bounds
-from .consumption_profile import ConsumptionForecast, ConsumptionProfileTracker, INTERVAL_COUNT
+from .consumption_profile import (
+    ConsumptionForecast,
+    ConsumptionProfileTracker,
+    INTERVAL_COUNT,
+    MAX_SAMPLE_GAP_SECONDS,
+)
 from .solar_profile import SolarProfileTracker
 
 if TYPE_CHECKING:
@@ -61,14 +70,21 @@ HOME_CONSUMPTION_MIN_BALANCE_W = 20.0
 def coordinator_ac_power_w(coordinator: Any) -> float | None:
     """Return a coordinator's signed AC power in watts.
 
-    Marstek coordinators expose ``ac_power`` directly.  Registerless drivers
-    expose ``battery_power`` with the opposite sign, so use the same fallback
-    convention as the aggregate Home Consumption sensor.
+    Same source order as the aggregate Home Consumption sensor: the device's own
+    AC port (``ac_delivered_power``, published in ``battery_power`` convention)
+    before Marstek's ``ac_power`` register, and cell-side ``battery_power`` only
+    as a last resort — on a battery with PV on its own DC bus the cells read
+    "charging" from the sun with nothing crossing the AC port, which would bill
+    the array to the house and to the integrated daily total (issue #453).
     """
     data = getattr(coordinator, "data", None)
     if not data:
         return None
-    value = data.get("ac_power")
+    value = data.get(DELIVERED_AC_POWER_KEY)
+    if value is not None:
+        value = -value
+    else:
+        value = data.get("ac_power")
     if value is None:
         battery_power = data.get("battery_power")
         if battery_power is None:
@@ -116,6 +132,10 @@ def home_balance_is_suspicious(
 
 class ConsumptionTracker:
     """Manages consumption history, accumulators and solar timing."""
+
+    # Re-entrancy guard for ``_vacation_baseline_kw``; see the note there.
+    # Class-level so instances built without ``__init__`` still have it.
+    _vacation_baseline_running = False
 
     def __init__(
         self,
@@ -192,7 +212,7 @@ class ConsumptionTracker:
         self._last_valid_raw_home_power_monotonic: Optional[float] = None
         self._grid_at_min_soc_last_save_mono: float = 0.0
         self._accumulator_last_save_monotonic: float = 0.0
-        self._solar_noon_cache: Optional[tuple[date, float]] = None
+        self._solar_noon_cache: dict[date, float] = {}
         self._legacy_backfill_task: asyncio.Task | None = None
         self._legacy_accumulator_rebuild_pending = False
         self._legacy_derived_days = 0
@@ -384,6 +404,34 @@ class ConsumptionTracker:
         await self.save_consumption_history()
         await self._flush_vacation_state()
 
+    async def async_exclude_dates(self, start_date: date, end_date: date) -> None:
+        """Mask whole local days out of learning, exactly as a vacation does.
+
+        Deleting a day from the stores cannot work: both are caches over
+        Recorder, so the startup backfill re-queries whatever is missing and
+        puts the day straight back. The persisted exclusion is the only thing
+        a rebuild honours.
+        """
+        local_tz = dt_util.get_time_zone(
+            getattr(getattr(self._hass, "config", None), "time_zone", None)
+        ) or dt_util.UTC
+        start = datetime.combine(start_date, time.min, tzinfo=local_tz)
+        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=local_tz)
+        self._vacation_periods.append(
+            {"start": start.isoformat(), "end": end.isoformat()}
+        )
+        self._controller._daily_consumption_history = [
+            (day, energy)
+            for day, energy in self._controller._daily_consumption_history
+            if not start_date <= day <= end_date
+        ]
+        self._sync_profile_vacation_exclusions()
+        await self.save_consumption_history()
+        await self._flush_vacation_state()
+        _LOGGER.info(
+            "Excluded %s to %s from consumption learning", start_date, end_date
+        )
+
     def _vacation_baseline_kw(self) -> tuple[float, str]:
         """Return median valid-night load, then prior profile, history, default."""
         valid = [item for item in self._vacation_nights
@@ -394,17 +442,26 @@ class ConsumptionTracker:
         ]
         if values:
             return statistics.median(values), "vacation_night_median"
-        try:
-            today = dt_util.now().date()
-            midnight = datetime.combine(today, time.min, tzinfo=dt_util.now().tzinfo)
-            prior = self._consumption_profile.forecast_energy_between(
-                midnight + timedelta(hours=1), midnight + timedelta(hours=5),
-                exclude_charging_windows=False, fallback="legacy_daily",
-            )
-            if prior.source == "profile" and prior.energy_kwh > 0:
-                return prior.energy_kwh / 4.0, "prior_night_profile"
-        except Exception:  # noqa: BLE001
-            pass
+        # The profile's "legacy_daily" fallback resolves its daily value through
+        # ``get_avg_daily_consumption``, which lands back here while vacation is
+        # active. Without this guard the pair recursed ~140 deep on every read
+        # until RecursionError - swallowed below - and each entity state write
+        # blocked the event loop for seconds (#499).
+        if not self._vacation_baseline_running:
+            self._vacation_baseline_running = True
+            try:
+                today = dt_util.now().date()
+                midnight = datetime.combine(today, time.min, tzinfo=dt_util.now().tzinfo)
+                prior = self._consumption_profile.forecast_energy_between(
+                    midnight + timedelta(hours=1), midnight + timedelta(hours=5),
+                    exclude_charging_windows=False, fallback="legacy_daily",
+                )
+                if prior.source == "profile" and prior.energy_kwh > 0:
+                    return prior.energy_kwh / 4.0, "prior_night_profile"
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                self._vacation_baseline_running = False
         history = [energy for day, energy in self._controller._daily_consumption_history
                    if not self._period_intersects(
                        datetime.combine(day, time.min, tzinfo=dt_util.now().tzinfo),
@@ -1707,58 +1764,56 @@ class ConsumptionTracker:
     # Solar timing
     # ------------------------------------------------------------------
 
-    def calculate_solar_noon(self) -> float:
-        """Calculate local solar noon from HA longitude and timezone.
+    def calculate_solar_noon(self, for_date: date | None = None) -> float:
+        """Calculate local solar noon from HA location and timezone.
 
         Returns solar noon as a float hour (e.g. 13.25 = 13:15).
-        Cached per day (recalculated when date changes to handle DST transitions).
+        Cached per date to handle DST transitions.
         """
-        from zoneinfo import ZoneInfo
+        target_date = for_date or datetime.now().date()
+        if target_date in self._solar_noon_cache:
+            return self._solar_noon_cache[target_date]
 
-        today = datetime.now().date()
-        if self._solar_noon_cache is not None and self._solar_noon_cache[0] == today:
-            return self._solar_noon_cache[1]
-
-        tz = ZoneInfo(self._hass.config.time_zone)
-        utc_offset = datetime.now(tz).utcoffset().total_seconds() / 3600
-        solar_noon = 12.0 - (self._hass.config.longitude / 15.0) + utc_offset
-        self._solar_noon_cache = (today, solar_noon)
+        config = self._hass.config
+        # Noon does not depend on latitude; fall back to the equator when unset.
+        observer = Observer(latitude=config.latitude or 0.0, longitude=config.longitude)
+        solar_noon = self._local_hours(
+            astral_noon(observer, target_date, tzinfo=ZoneInfo(config.time_zone)),
+            target_date,
+        )
+        self._solar_noon_cache[target_date] = solar_noon
         _LOGGER.info(
-            "Weekly Full Charge Delay: Solar noon calculated at %.2fh (longitude=%.2f, UTC offset=%.1f)",
-            solar_noon, self._hass.config.longitude, utc_offset,
+            "Weekly Full Charge Delay: Solar noon calculated at %.2fh (longitude=%.2f)",
+            solar_noon, config.longitude,
         )
         return solar_noon
 
-    def calculate_sunrise(self) -> Optional[float]:
-        """Estimate local sunrise time from HA latitude/longitude and day of year.
+    def calculate_sunrise(self, for_date: date | None = None) -> Optional[float]:
+        """Return local sunrise from HA latitude/longitude via astral.
 
-        Uses the standard solar declination + hour-angle formula.
         Returns sunrise as a float hour (e.g. 7.5 = 07:30), or None if the
-        sun never rises today (polar night) or if HA location is not configured.
+        sun never rises on the requested date (polar night/day) or if HA location
+        is not configured.
         """
         try:
-            latitude = self._hass.config.latitude
-            if latitude is None:
+            config = self._hass.config
+            if config.latitude is None:
                 return None
 
-            day_of_year = datetime.now().timetuple().tm_yday
-            lat_rad = math.radians(latitude)
-
-            # Solar declination (degrees → radians)
-            declination_rad = math.radians(
-                -23.45 * math.cos(math.radians(360 / 365 * (day_of_year + 10)))
+            target_date = for_date or datetime.now().date()
+            observer = Observer(latitude=config.latitude, longitude=config.longitude)
+            return self._local_hours(
+                astral_sunrise(observer, target_date, tzinfo=ZoneInfo(config.time_zone)),
+                target_date,
             )
-
-            # Hour angle at sunrise: cos(H) = -tan(lat) * tan(dec)
-            cos_h = -math.tan(lat_rad) * math.tan(declination_rad)
-            if cos_h < -1 or cos_h > 1:
-                return None  # Polar day / polar night
-
-            hour_angle_deg = math.degrees(math.acos(cos_h))
-            solar_noon = self.calculate_solar_noon()
-            return solar_noon - hour_angle_deg / 15.0
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - astral raises ValueError at polar night/day
             return None
+
+    @staticmethod
+    def _local_hours(moment: datetime, target_date: date) -> float:
+        """Wall-clock hours of ``moment`` since local midnight of ``target_date``."""
+        days = (moment.date() - target_date).days
+        return days * 24 + moment.hour + moment.minute / 60 + moment.second / 3600
 
     def detect_solar_t_start(self) -> None:
         """Detect start of solar production via grid sensor and battery state.
@@ -1959,12 +2014,19 @@ class ConsumptionTracker:
         )
 
         if power_kw is None:
+            # Break continuity like every other integrator here: leaving the
+            # timestamp behind would make the next valid sample bill the whole
+            # telemetry outage at that one power level.
+            self._household_last_accumulation_time = None
             return
 
         now = profile_mono
         if self._household_last_accumulation_time is not None:
-            dt_hours = (now - self._household_last_accumulation_time) / 3600.0
-            ctrl._household_energy_accumulator += max(0.0, power_kw) * dt_hours
+            elapsed = now - self._household_last_accumulation_time
+            # Same gap cap as the quarter-hour profile: a stalled control loop
+            # must not integrate one sample across hours of missing data.
+            if 0.0 < elapsed <= MAX_SAMPLE_GAP_SECONDS:
+                ctrl._household_energy_accumulator += max(0.0, power_kw) * (elapsed / 3600.0)
         self._household_last_accumulation_time = now
 
     def _record_vacation_night_sample(

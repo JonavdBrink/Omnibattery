@@ -122,17 +122,34 @@ def test_cutoff_below_99_confirms_without_weekly_charge():
 
 
 def test_accepting_charge_resets_counter():
-    """A battery taking the charge it was offered is not full → counter resets."""
+    """A battery taking the charge it was offered for N cycles is not full → reset."""
     coord = _Coord("bat", soc=94, power=0, commanded=200)
     m = _mgr(coord)
     for _ in range(_BMS_CUTOFF_REQUIRED_CYCLES - 1):
         m.tick_bms_cutoff()
     assert m._bms_cutoff_counts["bat"] == _BMS_CUTOFF_REQUIRED_CYCLES - 1
-    # Now it accepts charge.
+    # Now it accepts charge; one sample is not enough to reset.
     coord.data["battery_power"] = 150
     m.tick_bms_cutoff()
+    assert m._bms_cutoff_counts["bat"] == _BMS_CUTOFF_REQUIRED_CYCLES - 1
+    for _ in range(_BMS_CUTOFF_REQUIRED_CYCLES - 1):
+        m.tick_bms_cutoff()
     assert m._bms_cutoff_counts["bat"] == 0
     assert m.is_battery_full(coord) is False
+
+
+def test_flapping_bms_confirms_cutoff():
+    """v3 at 88% with every cell full flaps Charge ↔ Standby every few seconds.
+    Brief acceptances must not erase the refusals, or the cutoff never confirms."""
+    coord = _Coord("bat", soc=88, power=0, commanded=200)
+    m = _mgr(coord)
+    m.is_active = lambda: False
+    for _ in range(_BMS_CUTOFF_REQUIRED_CYCLES):
+        coord.data.update(battery_power=0, inverter_state=_STANDBY)
+        m.tick_bms_cutoff()
+        coord.data.update(battery_power=150, inverter_state=2)
+        m.tick_bms_cutoff()
+    assert m.is_battery_full(coord) is True
 
 
 def test_venus_ad_100_soc_waits_for_bms_cutoff_when_top_charge_path_is_active():

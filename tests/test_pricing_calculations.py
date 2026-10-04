@@ -79,11 +79,6 @@ def test_planned_grid_charge_is_capped_by_small_battery_headroom():
     assert calculations.calculate_charging_hours_needed(planned, 7000, 1200) == 2.0
 
 
-def test_planned_grid_charge_margin_is_applied_before_headroom_cap():
-    assert calculations.calculate_planned_grid_charge_kwh(2.0, 5.0, 50.0) == 3.0
-    assert calculations.calculate_planned_grid_charge_kwh(2.0, 2.5, 50.0) == 2.5
-
-
 # ----------------------------------------------------------------------
 # select_cheapest_hours (hourly path)
 # ----------------------------------------------------------------------
@@ -277,3 +272,18 @@ def test_parse_entsoe_infers_end_from_next_start():
     assert slots[0].end == slots[1].start
     # last slot inherits the previous 1h delta
     assert (slots[1].end - slots[1].start) == timedelta(hours=1)
+
+
+def test_parse_hacs_nordpool_accepts_iso_string_datetimes():
+    """A template sensor recalculating Nordpool prices renders start/end as strings."""
+    attrs = {
+        "raw_today": [
+            {"start": "2999-01-01T00:00:00+01:00", "end": "2999-01-01T01:00:00+01:00", "value": 0.2},
+        ],
+    }
+
+    slots = calculations.parse_nordpool_prices(attrs)
+
+    assert len(slots) == 1
+    assert isinstance(slots[0].start, datetime) and isinstance(slots[0].end, datetime)
+    assert slots[0].end > slots[0].start

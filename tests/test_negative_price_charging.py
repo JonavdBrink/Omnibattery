@@ -122,7 +122,7 @@ async def _noop(*_args, **_kwargs):
 def _evaluate(ctrl: SimpleNamespace, slots: list[PriceSlot]) -> PricingManager:
     manager = PricingManager(SimpleNamespace(), ctrl)
     manager._maybe_refresh_service_prices = _noop
-    manager._parse_price_data = lambda horizon_end=None: slots
+    manager._parse_price_data = lambda horizon_end=None, **_kwargs: slots
     manager._send_dynamic_pricing_notification = _noop
     manager._build_curtailment_plan = lambda *_args, **_kwargs: CurtailmentPlan(
         status="no_risk", reason="none"
@@ -319,6 +319,7 @@ def test_opportunity_target_stays_authoritative_during_weekly_full_charge():
         grid_charging_active=True,
         _active_dynamic_slot_purpose=SLOT_PURPOSE_NEGATIVE_PRICE,
         _predictive_charge_target_soc={battery: 90.0},
+        _get_active_slot=lambda *a, **k: None,
     )
 
     ceiling, source = ChargeDischargeController._effective_charge_max_soc(
@@ -335,6 +336,7 @@ def test_normal_predictive_target_stays_authoritative_during_weekly_full_charge(
         grid_charging_active=True,
         _active_dynamic_slot_purpose=SLOT_PURPOSE_DEFICIT,
         _predictive_charge_target_soc={battery: 30.0},
+        _get_active_slot=lambda *a, **k: None,
     )
 
     ceiling, source = ChargeDischargeController._effective_charge_max_soc(
@@ -374,7 +376,6 @@ def test_combined_calendar_keeps_positive_slot_deficit_only():
     assert schedule.purpose_for(slots[1]) == SLOT_PURPOSE_DEFICIT
 
     ctrl._last_decision_data = _decision(should_charge=True, deficit=2.0)
-    ctrl._predictive_grid_charge_margin_pct = 0.0
     ctrl._active_dynamic_slot_purpose = SLOT_PURPOSE_DEFICIT
     positive_target = ChargeDischargeController._compute_predictive_target_soc(ctrl)
     ctrl._active_dynamic_slot_purpose = SLOT_PURPOSE_COMBINED
@@ -569,7 +570,7 @@ def test_evaluation_moves_opportunity_out_of_solar_risk_window():
     risky, safe = _future_slots([-0.50, -0.20])
     manager = PricingManager(SimpleNamespace(), ctrl)
     manager._maybe_refresh_service_prices = _noop
-    manager._parse_price_data = lambda horizon_end=None: [risky, safe]
+    manager._parse_price_data = lambda horizon_end=None, **_kwargs: [risky, safe]
     manager._send_dynamic_pricing_notification = _noop
     manager._build_curtailment_plan = lambda *_args, **_kwargs: CurtailmentPlan(
         status="planned", reason="solar_risk", risk_slots=[risky]
@@ -594,7 +595,7 @@ def test_guaranteed_minimum_floor_keeps_only_deficit_in_solar_risk_window():
     risky = _future_slots([-0.50])[0]
     manager = PricingManager(SimpleNamespace(), ctrl)
     manager._maybe_refresh_service_prices = _noop
-    manager._parse_price_data = lambda horizon_end=None: [risky]
+    manager._parse_price_data = lambda horizon_end=None, **_kwargs: [risky]
     manager._send_dynamic_pricing_notification = _noop
     manager._build_curtailment_plan = lambda *_args, **_kwargs: CurtailmentPlan(
         status="planned", reason="solar_risk", risk_slots=[risky]
@@ -637,6 +638,7 @@ def _prepare_runtime_manager(
     manager._check_dp_pre_slot_reevaluation = _noop
     manager._is_evening_reevaluation_time = lambda: False
     manager._is_dp_soc_drop_reeval = lambda: False
+    manager._is_price_publication_reeval = lambda _now: False
     manager._get_current_price = lambda: slot.price
     return manager
 
@@ -787,6 +789,7 @@ def test_charge_blocker_prevents_entering_an_opportunity_slot():
     manager._check_dp_pre_slot_reevaluation = _noop
     manager._is_evening_reevaluation_time = lambda: False
     manager._is_dp_soc_drop_reeval = lambda: False
+    manager._is_price_publication_reeval = lambda _now: False
     manager._get_current_price = lambda: -0.20
 
     asyncio.run(manager.handle_dynamic_pricing_predictive_charging())

@@ -73,18 +73,47 @@ MESSAGE_WAIT_MS = {
     "vD": 150,
 }
 
+# The waits above live in the battery's Modbus *TCP* server task, not in its
+# RS485 one (firmware disassembly of a v3, issue #411): reached through an
+# RS485 gateway (Elfin EW11, USB-RS485 adapter, ...) that delay buys nothing
+# and costs ~1 s of every v3 poll cycle. Opt-in per battery via
+# CONF_RS485_GATEWAY, and it replaces the wait for every firmware version.
+# Each battery paces its own socket, so N batteries daisy-chained on one
+# gateway put N times the frames on the shared bus; only a single-battery
+# gateway is field-tested (#411).
+MESSAGE_WAIT_MS_RS485_GATEWAY = 30
+
 # Version-specific per-attempt timeout (seconds), passed to pymodbus.
 # The v3 weak MCU answers in well under a second at the 150ms cadence, but
 # occasionally stalls for several seconds and then flushes queued replies in a
 # burst. Each pymodbus-internal retry re-sends the SAME transaction_id (>=3.8),
 # so a reply arriving after a per-attempt timeout still matches the retry and
-# is consumed (issue #361 history in infra/modbus_client.py). Keep v3 attempts
-# short so the retries land inside the stall window.
+# is consumed (issue #361 history in infra/modbus_client.py).
+#
+# That is why these were kept short: let the retry land inside the stall. On a
+# Venus D it does not work out that way. The stall is a regular one - every
+# five minutes the battery stops answering for about four seconds, 138 times
+# over eleven hours, mean 4.05 s, longest 4.46 s, measured at the Modbus proxy
+# so it is the device and not the client. A three second attempt expires inside
+# every one of them, the retry puts a duplicate request on the wire, and the
+# battery answers both: the first reply arrives with nothing waiting for it and
+# is discarded ("received pdu without a corresponding request"), or lands while
+# the next request is outstanding and is discarded as a transaction id mismatch.
+# Twelve times an hour, for a stall the battery always comes back from.
+#
+# Six seconds covers it with room to spare and the noise stops. The cost is
+# that a battery that is genuinely gone is given longer before the attempt is
+# abandoned - the outer safety net in infra/modbus_client.py grows from 11 s to
+# 20 s - which is the right trade for a device whose only failure mode here is
+# being four seconds late.
+#
+# v3 and vA are left as they are: the same family, but this was measured on a
+# Venus D (EMS v150) and nowhere else.
 READ_TIMEOUT_S = {
     "v2": 10,
     "v3": 3,
     "vA": 3,
-    "vD": 3,
+    "vD": 6,
 }
 
 # Standalone bit-description maps — used by both sensor definitions and the

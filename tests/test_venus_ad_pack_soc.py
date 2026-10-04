@@ -6,7 +6,7 @@ pack publishes its own SOC on a stride-100 layout (34002, 34102, ...).
 
 Two things are pinned here:
 
-* the start-up probe that learns which of the six slots exist — an absent slot
+* the start-up probe that learns which slots exist — an absent slot
   may either fail to answer or read a flat 0, and the probe must be right under
   both without knowing which the firmware does;
 * the *additional* discharge floor: a pack at min_soc blocks discharge even
@@ -23,6 +23,7 @@ import pytest
 
 from custom_components.omnibattery import ChargeDischargeController
 from custom_components.omnibattery.const import PACK_SOC_KEYS
+from custom_components.omnibattery.const.registers_va import SENSOR_DEFINITIONS_VA
 from custom_components.omnibattery.drivers import MarstekModbusDriver
 from custom_components.omnibattery.drivers.marstek import _PACK_PROBE_CYCLES
 
@@ -138,11 +139,14 @@ async def test_v3_has_no_pack_sensors():
 
 # --- control: pack-aware charge ceiling and discharge floor -----------------
 #
-# The verdicts are asymmetric because the packs fill in sequence:
+# Both verdicts read min(pack_soc), and the reason is that the hardware is not
+# symmetric:
 #   full  <=> the LEAST full pack reached the ceiling  -> min(pack_soc)
-#   empty <=> the FULLEST pack reached the floor       -> max(pack_soc)
-# Neither may fire on the first pack to get there, which is the #350 bug and its
-# mirror image.
+#   empty <=> the FIRST pack reached the floor         -> min(pack_soc)
+# Charging walks on to the next pack when one fills, which is what the #350
+# handovers showed, so the ceiling must not fire on the first pack to get there.
+# Discharging does not walk on: a Venus D stops the whole battery at its first
+# pack and strands the rest, so the floor must fire exactly there.
 
 
 def _discharge_blocks(data, *, min_soc=10):
@@ -183,7 +187,7 @@ def _chargeable(data, *, max_soc=100):
         is_charge_blocked=lambda c: False,
         get_charge_blockers=lambda c: {},
         _weekly_full_charge_unlocked=lambda: False,
-        _effective_charge_max_soc=lambda c, w: (max_soc, "max_soc"),
+        _effective_charge_max_soc=lambda c, w, **_kw: (max_soc, "max_soc"),
         _should_charge_to_bms_cutoff=lambda c, m: False,
         _normal_balance_recal_override={},
         _weekly_charge_mgr=SimpleNamespace(is_battery_full=lambda c: False),
@@ -193,26 +197,79 @@ def _chargeable(data, *, max_soc=100):
     return got == [coordinator]
 
 
-# --- discharge: the fullest pack decides ------------------------------------
+# --- discharge: the first pack to empty decides -----------------------------
 
 
-def test_a_pack_at_the_floor_does_not_stop_the_others():
-    # The mirror of #350: the first pack to empty must not end the discharge
-    # while another still holds charge.
+def test_one_pack_at_the_floor_ends_the_discharge():
+    # A Venus D stops the whole battery there. The 50% in the other pack is
+    # real but unreachable, and counting it commands into a stopped battery.
     data = {"battery_soc": 30, "battery_soc_pack_1": 50.0, "battery_soc_pack_2": 10.0}
-    assert not _discharge_blocks(data)
-    assert _dischargeable(data)
-
-
-def test_discharge_stops_when_the_fullest_pack_reaches_the_floor():
-    data = {"battery_soc": 30, "battery_soc_pack_1": 10.0, "battery_soc_pack_2": 8.0}
     assert _discharge_blocks(data)
     assert not _dischargeable(data)
 
 
+def test_a_battery_above_the_floor_on_every_pack_keeps_going():
+    data = {"battery_soc": 30, "battery_soc_pack_1": 40.0, "battery_soc_pack_2": 12.0}
+    assert not _discharge_blocks(data)
+    assert _dischargeable(data)
+
+
+def test_the_measured_six_pack_case():
+    """4 September, cutoff 12%: aggregate 15%, three packs on the floor, and the
+    device delivering nothing while the control layer commanded 938 W."""
+    data = {
+        "battery_soc": 15,
+        "battery_soc_pack_1": 12.1, "battery_soc_pack_2": 12.0,
+        "battery_soc_pack_3": 19.0, "battery_soc_pack_4": 12.0,
+        "battery_soc_pack_5": 20.3, "battery_soc_pack_6": 19.3,
+    }
+    assert _discharge_blocks(data, min_soc=12)
+    assert not _dischargeable(data, min_soc=12)
+
+
+def test_a_seventh_pack_decides_like_any_other():
+    # #415 added a seventh pack to this installation. A slot missing from
+    # PACK_SOC_KEYS is never polled, so its SOC never reaches the min() the
+    # floor is taken on and the battery keeps being commanded to discharge a
+    # pack that is already at the cutoff.
+    data = {"battery_soc": 40, "battery_soc_pack_7": 12.0}
+    data.update({f"battery_soc_pack_{n}": 40.0 for n in range(1, 7)})
+    assert _discharge_blocks(data, min_soc=12)
+    assert not _dischargeable(data, min_soc=12)
+
+
+def test_every_pack_slot_has_its_stride_100_address():
+    assert len(PACK_SOC_KEYS) == 7
+    addresses = {
+        d["key"]: d["register"]
+        for d in SENSOR_DEFINITIONS_VA
+        if d["key"] in PACK_SOC_KEYS
+    }
+    assert addresses == {
+        key: _pack_register(n) for n, key in enumerate(PACK_SOC_KEYS, start=1)
+    }
+
+
 def test_packs_override_an_aggregate_already_at_the_floor():
-    # The aggregate is at the floor but a pack still has 40% to give: keep going.
+    # Unchanged by the swap to min(): the aggregate is at the floor but every
+    # pack is above it, so the battery keeps going.
     data = {"battery_soc": 10, "battery_soc_pack_1": 40.0, "battery_soc_pack_2": 12.0}
+    assert not _discharge_blocks(data)
+    assert _dischargeable(data)
+
+
+def test_a_slot_written_off_by_the_probe_does_not_read_as_empty():
+    """The stale zero. An absent slot answers a flat 0 for the probe's cycles;
+    the driver then stops polling it, so the coordinator keeps that 0 for good.
+    Harmless against the fullest pack, fatal against the first: a battery at
+    80% would be excluded from discharge and never released, because the
+    min-SOC latch only clears on a recovery the stale key can never show."""
+    data = {
+        "battery_soc": 80,
+        "battery_soc_pack_1": 80.0, "battery_soc_pack_2": 80.0,
+        "battery_soc_pack_3": None, "battery_soc_pack_4": None,
+        "battery_soc_pack_5": None, "battery_soc_pack_6": None,
+    }
     assert not _discharge_blocks(data)
     assert _dischargeable(data)
 
@@ -323,3 +380,107 @@ def test_full_verdict_waits_for_the_least_full_pack():
     assert _weekly(coord).is_battery_full(coord) is False
     coord.data["battery_soc_pack_2"] = 100.0
     assert _weekly(coord).is_battery_full(coord) is True
+
+
+@pytest.mark.asyncio
+async def test_a_written_off_slot_is_purged_not_merely_dropped():
+    """Stopping the polls is not enough: the zeros already stored stay unless
+    the slot's key is overwritten once, on the cycle it is written off."""
+    reads = {32104: 80, _pack_register(1): 800, _pack_register(2): 800}
+    driver = _driver(reads)
+
+    # Every slot answers during the probe; the absent ones answer a flat 0.
+    for n in range(3, 7):
+        reads[_pack_register(n)] = 0
+
+    seen = []
+    for _ in range(_PACK_PROBE_CYCLES):
+        await driver.read_telemetry(["battery_soc"])
+        for key in PACK_SOC_KEYS:
+            seen.append(await driver.read_telemetry([key]))
+
+    assert driver._packs == {"battery_soc_pack_1", "battery_soc_pack_2"}
+
+    # Exactly one snapshot carries the purge, on the cycle the probe finished,
+    # and it names every written-off slot.
+    purges = [s for s in seen if s.get("battery_soc_pack_3", "missing") is None]
+    assert len(purges) == 1
+    for n in range(3, 7):
+        assert purges[0][f"battery_soc_pack_{n}"] is None
+    # Only the written-off slots are purged; a populated one is never nulled.
+    assert not any(
+        s.get("battery_soc_pack_1", "missing") is None
+        or s.get("battery_soc_pack_2", "missing") is None
+        for s in seen
+    )
+
+
+# --- runtime pack changes: the BMS online mask (issue #526) -----------------
+
+
+def _polled(driver):
+    return {k for g in driver.read_groups for k in g.keys}
+
+
+async def _poll_into(driver, data):
+    """One coordinator-shaped poll of every read group, merged like coordinator.data."""
+    for group in driver.read_groups:
+        snapshot = await driver.read_telemetry(list(group.keys))
+        for key, value in snapshot.items():
+            if key in PACK_SOC_KEYS and value is not None:
+                value = value * 0.1
+            data[key] = value
+
+
+@pytest.mark.asyncio
+async def test_a_pack_removed_after_the_probe_leaves_the_floor_and_comes_back():
+    """#526: pack 7 pulled off a running seven-pack Venus D kept its slot in the
+    poll reading 0, and min(pack_soc) held the battery at 72 % out of discharge
+    until a reload. The mask (32110) followed the hardware: 127 -> 63."""
+    reads = {32104: 72, 32110: 127}
+    reads.update({_pack_register(n): 720 for n in range(1, 8)})
+    driver = _driver(reads)
+    data = {}
+    await _poll_into(driver, data)
+    assert set(PACK_SOC_KEYS) <= _polled(driver)
+
+    reads[32110] = 63
+    reads[_pack_register(7)] = 0
+    await _poll_into(driver, data)
+    await _poll_into(driver, data)
+
+    assert data["battery_soc_pack_7"] is None
+    assert "battery_soc_pack_7" not in _polled(driver)
+    assert "max_cell_voltage_pack_7" not in _polled(driver)
+    assert _dischargeable(data, min_soc=12)
+
+    # Plugged back in: the slot is polled again without a reload.
+    reads[32110] = 127
+    reads[_pack_register(7)] = 650
+    await _poll_into(driver, data)
+    await _poll_into(driver, data)
+    assert "battery_soc_pack_7" in _polled(driver)
+    assert data["battery_soc_pack_7"] == pytest.approx(65.0)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_or_zero_mask_read_keeps_the_last_known_packs():
+    reads = {32104: 72, 32110: 3}
+    reads.update({_pack_register(n): 720 for n in (1, 2)})
+    driver = _driver(reads)
+    await _poll_into(driver, {})
+    assert driver._packs & set(PACK_SOC_KEYS) == {"battery_soc_pack_1", "battery_soc_pack_2"}
+
+    for bad in (None, 0):
+        reads[32110] = bad
+        await _poll_into(driver, {})
+        assert driver._packs & set(PACK_SOC_KEYS) == {
+            "battery_soc_pack_1", "battery_soc_pack_2",
+        }
+
+
+@pytest.mark.asyncio
+async def test_the_mask_is_venus_a_d_only():
+    driver = _driver({37005: 80}, version="v3")
+    assert "pack_online_mask" not in _polled(driver)
+    assert "pack_online_mask" not in {d["key"] for d in driver.sensor_definitions}

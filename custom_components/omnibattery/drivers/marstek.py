@@ -26,12 +26,17 @@ from typing import Optional
 
 from ..const import (
     MESSAGE_WAIT_MS,
+    MESSAGE_WAIT_MS_RS485_GATEWAY,
+    PACK_MAX_CELL_KEYS,
+    PACK_MIN_CELL_KEYS,
+    PACK_ONLINE_MASK_DEFINITION,
+    PACK_ONLINE_MASK_KEY,
     PACK_SOC_KEYS,
     READ_TIMEOUT_S,
     REGISTER_MAP,
     max_power_for_battery_version,
 )
-from ..infra.modbus_client import MarstekModbusClient, decode_registers
+from ..infra.modbus_client import BLOCK_REFUSED, MarstekModbusClient, decode_registers
 from .base import (
     BatteryDriver,
     DriverCapabilities,
@@ -46,6 +51,19 @@ _LOGGER = logging.getLogger(__name__)
 # hardware SOC cut-off registers, packet correction.
 _V3_FAMILY = ("v3", "vA", "vD")
 
+
+def _message_wait_ms(version: str, rs485_gateway: bool = False) -> int:
+    """Inter-message spacing for this version and transport.
+
+    The per-version wait is a delay inside the battery's Modbus *TCP* server
+    task; the RS485 task has no equivalent (issue #411, disassembled on v3), so
+    a battery reached through an RS485 gateway only needs ordinary RTU spacing,
+    whatever its firmware.
+    """
+    if rs485_gateway:
+        return MESSAGE_WAIT_MS_RS485_GATEWAY
+    return MESSAGE_WAIT_MS.get(version, 50)
+
 # Venus A/D pack-SOC discovery (issue #350). How many packs a Venus A/D has is
 # not readable anywhere, so the populated slots are learned from which of them
 # answers. Give each slot this many poll cycles ("low" = 30 s) before deciding it
@@ -54,6 +72,14 @@ _V3_FAMILY = ("v3", "vA", "vD")
 # aggregate SOC says the battery holds real charge.
 _PACK_PROBE_CYCLES = 3
 _EMPTY_SLOT_AGGREGATE_SOC = 5
+
+# Everything read per physical pack slot: its SOC and, since #439, its own max
+# and min cell voltage. All of it goes through the same start-up probe — three
+# tries, then off the schedule for good — so a register that is not there stops
+# being asked for instead of costing a frame per cycle forever on a battery with
+# one TCP slot.
+_PACK_CELL_KEYS = frozenset(PACK_MAX_CELL_KEYS + PACK_MIN_CELL_KEYS)
+_SLOT_KEYS = frozenset(PACK_SOC_KEYS) | _PACK_CELL_KEYS
 
 # Marstek force_mode register values.
 _FORCE_NONE = 0
@@ -140,6 +166,8 @@ def _load_definitions(version: str) -> dict[str, list[dict]]:
         switch = SWITCH_DEFINITIONS
         binary_sensor = BINARY_SENSOR_DEFINITIONS
         button = BUTTON_DEFINITIONS
+    # Polled but entity-less: read only by the driver itself.
+    internal = [PACK_ONLINE_MASK_DEFINITION] if version in ("vA", "vD") else []
 
     # Venus D number definitions contain mutable slider metadata.  Each Venus D
     # driver needs its own copy because its maxima can change after EMS firmware
@@ -160,26 +188,113 @@ def _load_definitions(version: str) -> dict[str, list[dict]]:
         + definitions["select"]
         + definitions["switch"]
         + definitions["binary_sensor"]
+        + internal
     )
     return definitions
 
 
-def _load_register_blocks(version: str) -> list[dict]:
-    """Return this Marstek version's contiguous register-block table (issue #361).
+_MAX_BLOCK_REGISTERS = 125  # Modbus caps one read at 125 holding registers.
 
-    Block reads collapse already-adjacent registers into a single Modbus request so
-    the weak v3 MCU sees fewer frames. v3/vA/vD share the v3 register map and reuse
-    the v3 blocks; v2 has its own table. Which registers are contiguous is brand/
-    register detail, so this table — like the entity definitions — belongs in the
-    driver, not the coordinator.
+
+def _register_width(defn: dict) -> int:
+    """Registers a definition occupies, matching MarstekModbusClient's default."""
+    count = defn.get("count")
+    if isinstance(count, int) and count > 0:
+        return count
+    return 2 if defn.get("data_type") in ("int32", "uint32") else 1
+
+
+def _probe_family(key: str) -> str:
+    """Which probe decides whether a key is polled at all.
+
+    A pack slot that never answers leaves the read groups, and a group goes as
+    a whole (see :meth:`MarstekModbusDriver._learn_pack`). Grouping a probed
+    key with an unprobed neighbour would therefore let an absent pack take an
+    unrelated register out of the poll with it, so they are kept apart - the
+    same way a differing scan interval keeps two neighbours apart.
     """
-    if version in _V3_FAMILY:
-        from ..const import REGISTER_BLOCKS_V3
-        return REGISTER_BLOCKS_V3
-    if version == "v2":
-        from ..const import REGISTER_BLOCKS_V2
-        return REGISTER_BLOCKS_V2
-    return []
+    if key in PACK_SOC_KEYS:
+        return "pack-soc"
+    if key in _PACK_CELL_KEYS:
+        return "pack-cell"
+    return ""
+
+
+def _derive_register_blocks(definitions: list[dict]) -> list[dict]:
+    """Build the contiguous-block table from the entity definitions.
+
+    Same output shape and the same rule as the hand-maintained tables this
+    replaces (issue #361): only registers that are already adjacent are grouped,
+    never padding across a gap, so an unmapped address can never be pulled into
+    a block. What changes is that the rule is applied to every polled register
+    instead of the handful somebody noticed, which is where most of the saving
+    was still sitting: on a Venus D the per-poll request count drops by about a
+    fifth, and it is the two-second group that shrinks most.
+
+    Members of a block must share a scan interval, because a block is scheduled
+    as one unit and is fetched whenever it comes due, and must belong to the
+    same probe family (see :func:`_probe_family`), because a group that is
+    dropped is dropped whole.
+
+    Deriving also settles by itself what the table had to state by hand: only
+    vA/vD get the per-pack 34000 block (#439). A v3 shares the entity map but
+    not those registers, and its definitions do not carry them, so nothing to
+    group is there — where the table had to be told, and giving a v3 the block
+    would have burnt a failing read every cycle on the model that can least
+    afford one.
+
+    A span of one register is left out: it would be a block with a single
+    member, which reads exactly like the per-register path it replaced while
+    costing an extra layer to follow when reading a log.
+    """
+    partitions: dict[tuple, list[dict]] = {}
+    for defn in definitions:
+        if defn.get("register") is None:
+            continue
+        partitions.setdefault(
+            (defn.get("scan_interval"), _probe_family(defn["key"])), []
+        ).append(defn)
+
+    blocks: list[dict] = []
+    for (scan_interval, _family), entries in partitions.items():
+        entries.sort(key=lambda d: d["register"])
+        run: list[dict] = []
+
+        def flush(run: list[dict]) -> None:
+            if len(run) < 2:
+                return
+            start = run[0]["register"]
+            end = max(d["register"] + _register_width(d) - 1 for d in run)
+            blocks.append({
+                "start": start,
+                "count": end - start + 1,
+                "scan_interval": scan_interval,
+                "members": [
+                    {
+                        "key": d["key"],
+                        "offset": d["register"] - start,
+                        "count": _register_width(d),
+                        "data_type": d.get("data_type", "uint16"),
+                    }
+                    for d in run
+                ],
+            })
+
+        end = None
+        for defn in entries:
+            register = defn["register"]
+            last = register + _register_width(defn) - 1
+            if run and register <= end + 1 and last - run[0]["register"] + 1 <= _MAX_BLOCK_REGISTERS:
+                run.append(defn)
+                end = max(end, last)
+                continue
+            flush(run)
+            run = [defn]
+            end = last
+        flush(run)
+
+    blocks.sort(key=lambda b: b["start"])
+    return blocks
 
 
 class MarstekModbusDriver(BatteryDriver):
@@ -198,6 +313,7 @@ class MarstekModbusDriver(BatteryDriver):
         client: Optional[MarstekModbusClient] = None,
         serial_port: Optional[str] = None,
         ems_version: object = None,
+        rs485_gateway: bool = False,
     ) -> None:
         """Build the driver.
 
@@ -208,7 +324,9 @@ class MarstekModbusDriver(BatteryDriver):
         itself; tests inject a flat list to drive telemetry/capabilities in
         isolation. ``client`` is injectable so unit tests can supply a fake;
         production passes None and a real :class:`MarstekModbusClient` is built
-        with version-correct timing.
+        with version-correct timing. ``rs485_gateway`` says the link reaches the
+        battery over RS485 rather than its own Modbus TCP server, which is where
+        the v3-family 150 ms inter-message wait lives (issue #411).
         """
         self._version = version
         self._ems_version = ems_version
@@ -219,7 +337,7 @@ class MarstekModbusDriver(BatteryDriver):
             client = MarstekModbusClient(
                 host,
                 port,
-                message_wait_ms=MESSAGE_WAIT_MS.get(version, 50),
+                message_wait_ms=_message_wait_ms(version, rs485_gateway),
                 timeout=READ_TIMEOUT_S.get(version, 10),
                 is_v3=self._is_v3_family,
                 slave_id=slave_id,
@@ -257,7 +375,13 @@ class MarstekModbusDriver(BatteryDriver):
         # Contiguous register-block table for the production path; the injected-
         # definition test path polls every key individually (no blocks). Block
         # batching is an internal read optimisation — see :meth:`read_telemetry`.
-        self._register_blocks = _load_register_blocks(version) if definitions is None else []
+        # Derived from the definitions rather than read from a hand-maintained
+        # table: same adjacency rule, applied to everything that is polled.
+        # The injected-definition test path keeps polling key by key.
+        self._register_blocks = (
+            _derive_register_blocks(self._definitions["all"]) if definitions is None else []
+        )
+        self._refused_register_blocks: set[tuple[int, int]] = set()
 
         # Telemetry grouped into schedulable poll units (see :class:`ReadGroup`):
         # one group per block (read in a single request) plus a singleton group per
@@ -275,7 +399,7 @@ class MarstekModbusDriver(BatteryDriver):
         self._pack_soc_capable = any(k in self._telemetry_index for k in PACK_SOC_KEYS)
         self._packs: set[str] = set()
         self._pack_probes_left: dict[str, int] = {
-            key: _PACK_PROBE_CYCLES for key in PACK_SOC_KEYS if key in self._telemetry_index
+            key: _PACK_PROBE_CYCLES for key in _SLOT_KEYS if key in self._telemetry_index
         }
         # Last aggregate SOC seen, so the probe can tell an empty slot reading 0
         # from a real pack that is genuinely flat. It arrives in a different read
@@ -388,13 +512,22 @@ class MarstekModbusDriver(BatteryDriver):
 
     @property
     def sensor_definitions(self) -> list[dict]:
-        if not self._pack_soc_capable or self._pack_probes_left:
-            # Still probing: nothing is hidden, since "has not answered yet" is
-            # not "is not there".
+        if not self._pack_soc_capable:
             return self._definitions["sensor"]
+        # A family still being probed hides nothing, since "has not answered yet"
+        # is not "is not there". Each settles on its own, so the SOC entities are
+        # not held back by a cell register that may never answer.
+        settled = set().union(
+            *(
+                family
+                for family in (frozenset(PACK_SOC_KEYS), _PACK_CELL_KEYS)
+                if family.isdisjoint(self._pack_probes_left)
+            ),
+            set(),
+        )
         return [
             d for d in self._definitions["sensor"]
-            if d["key"] not in PACK_SOC_KEYS or d["key"] in self._packs
+            if d["key"] not in settled or d["key"] in self._packs
         ]
 
     @property
@@ -495,15 +628,36 @@ class MarstekModbusDriver(BatteryDriver):
         return groups
 
     @property
+    def balance_dependency_keys(self) -> frozenset[str]:
+        """Per-pack cell voltages, which poll with their entities disabled (#439).
+
+        The balance monitor judges the battery on its worst pack, so it needs
+        these whether or not the owner wants fourteen more rows in Home Assistant
+        — the same split 37007/37008 and the pack SOCs already have. Every slot
+        while the probe is still running, the confirmed ones after; an absent slot
+        has left the read groups by then anyway.
+        """
+        if not self._pack_soc_capable:
+            return frozenset()
+        indexed = frozenset(
+            k for k in PACK_MAX_CELL_KEYS + PACK_MIN_CELL_KEYS
+            if k in self._telemetry_index
+        )
+        if not _PACK_CELL_KEYS.isdisjoint(self._pack_probes_left):
+            return indexed
+        return indexed & frozenset(self._packs)
+
+    @property
     def _active_pack_keys(self) -> frozenset[str]:
         """Pack-SOC keys worth polling: every slot while probing, the found ones after."""
         if not self._pack_soc_capable:
             return frozenset()
-        if self._pack_probes_left:
+        soc_keys = frozenset(PACK_SOC_KEYS)
+        if not soc_keys.isdisjoint(self._pack_probes_left):
             return frozenset(k for k in PACK_SOC_KEYS if k in self._telemetry_index)
-        return frozenset(self._packs)
+        return frozenset(self._packs) & soc_keys
 
-    def _learn_pack(self, key: str, raw: object) -> None:
+    def _learn_pack(self, key: str, raw: object, snapshot: dict) -> None:
         """Fold one pack-SOC read into the populated-slot set (issue #350).
 
         A slot the hardware does not have either fails to answer — its key is
@@ -512,11 +666,23 @@ class MarstekModbusDriver(BatteryDriver):
         a 0 disqualifies a slot only while the aggregate SOC says the battery
         holds meaningful charge, and each slot gets _PACK_PROBE_CYCLES attempts
         before it is written off.
+
+        The zeros a written-off slot produced have to be purged, not merely
+        stopped. They were stored on every probe cycle, and the coordinator keeps
+        what it was last given: dropping the slot from the read groups leaves the
+        last 0 behind for good. That is harmless to a verdict taken on the
+        fullest pack and fatal to one taken on the first, which is what the floor
+        now is — a battery whose real packs sit at 80 % would read 0 and be
+        excluded from discharge permanently, since the min-SOC latch releases
+        only on a recovery the stale key can never show. So the slot's key is
+        overwritten with None on the cycle it is written off; the coordinator
+        stores None as given and the control layer filters it out.
         """
         confirmed = raw is not None and (
             raw != 0
             or (
-                self._last_aggregate_soc is not None
+                key in PACK_SOC_KEYS
+                and self._last_aggregate_soc is not None
                 and self._last_aggregate_soc <= _EMPTY_SLOT_AGGREGATE_SOC
             )
         )
@@ -527,16 +693,62 @@ class MarstekModbusDriver(BatteryDriver):
             self._pack_probes_left[key] -= 1
             if self._pack_probes_left[key] <= 0:
                 del self._pack_probes_left[key]
-        if self._pack_probes_left:
+        # SOC and cell voltage are written off separately. The SOC verdict is what
+        # the charge ceiling and the discharge floor stand on (#350, #415); the
+        # cell registers are a diagnostic (#439), and making the first wait on the
+        # second would strand the control layer on a battery that never answers a
+        # cell read at all.
+        family = frozenset(PACK_SOC_KEYS) if key in PACK_SOC_KEYS else _PACK_CELL_KEYS
+        if not family.isdisjoint(self._pack_probes_left):
             return
-        absent = set(PACK_SOC_KEYS) - self._packs
+        absent = family - self._packs
         self._read_groups = [
             g for g in self._read_groups if absent.isdisjoint(g.keys)
         ]
+        for gone in absent:
+            snapshot[gone] = None
+        found = sorted(self._packs & family)
         _LOGGER.info(
-            "[%s] Pack SOC probe finished: %d pack(s) present (%s)",
+            "[%s] Pack %s probe finished: %d present (%s)",
             getattr(self._client, "host", "?"),
-            len(self._packs), ", ".join(sorted(self._packs)) or "none",
+            "SOC" if family is not _PACK_CELL_KEYS else "cell voltage",
+            len(found), ", ".join(found) or "none",
+        )
+
+    def _apply_pack_mask(self, mask: int, snapshot: dict) -> None:
+        """Let the BMS online mask (32110) decide which slots exist (issue #526).
+
+        The probe decides once, at start-up, and a pack removed after that kept
+        its slot in the poll reading a flat 0 — min(pack_soc) then judged a
+        battery at 72 % to be empty and it was never given a discharge setpoint
+        again until a reload. The mask follows the hardware both ways, so once
+        it answers it replaces the probe: an offline slot leaves the read
+        groups with its stale value purged to None (the same purge _learn_pack
+        does), a slot that comes back is polled again.
+        """
+        # ponytail: a slot back online also resumes its cell-voltage reads, even
+        # if the probe had written those registers off; matters only on a Venus A
+        # whose 34005/34006 do not answer, which nobody has reported.
+        online = frozenset(
+            k for k in _SLOT_KEYS
+            if k in self._telemetry_index
+            and mask >> (int(k.rsplit("_", 1)[1]) - 1) & 1
+        )
+        if online == self._packs and not self._pack_probes_left:
+            return
+        offline = _SLOT_KEYS - online
+        for gone in offline & self._telemetry_index.keys():
+            snapshot[gone] = None
+        self._packs = set(online)
+        self._pack_probes_left.clear()
+        self._read_groups = [
+            g for g in self._build_read_groups() if offline.isdisjoint(g.keys)
+        ]
+        found = sorted(online & frozenset(PACK_SOC_KEYS))
+        _LOGGER.info(
+            "[%s] BMS online pack mask %d: %d present (%s)",
+            getattr(self._client, "host", "?"), mask,
+            len(found), ", ".join(found) or "none",
         )
 
     @property
@@ -564,13 +776,30 @@ class MarstekModbusDriver(BatteryDriver):
         # Collapse any fully-requested contiguous block into one request.
         for block in self._register_blocks:
             member_keys = [m["key"] for m in block["members"]]
+            block_span = (block["start"], block["count"])
+            if block_span in self._refused_register_blocks:
+                continue
             if not all(k in pending for k in member_keys):
                 continue
             pending.difference_update(member_keys)
             regs = await self._client.async_read_block(
                 block["start"], block["count"], block_key=f"block_{block['start']}",
             )
+            if regs is BLOCK_REFUSED:
+                pending.update(member_keys)
+                self._refused_register_blocks.add(block_span)
+                _LOGGER.warning(
+                    "Block read at register %s (%s registers) was refused; "
+                    "falling back to individual reads for keys: %s",
+                    block["start"], block["count"], ", ".join(member_keys),
+                )
+                continue
             if regs is None:
+                _LOGGER.debug(
+                    "Block read at register %s (%s registers) failed; "
+                    "dropped keys this cycle: %s",
+                    block["start"], block["count"], ", ".join(member_keys),
+                )
                 continue
             for member in block["members"]:
                 words = regs[member["offset"]:member["offset"] + member["count"]]
@@ -594,12 +823,18 @@ class MarstekModbusDriver(BatteryDriver):
             )
             if value is not None:
                 snapshot[key] = value
+            else:
+                _LOGGER.debug("Individual read failed for key %s", key)
 
         if "battery_soc" in snapshot:
             self._last_aggregate_soc = snapshot["battery_soc"]
+        # 0 is no reading: a battery that answers has at least one pack. A failed
+        # read leaves the key out, so the last known set stands.
+        if snapshot.get(PACK_ONLINE_MASK_KEY):
+            self._apply_pack_mask(int(snapshot[PACK_ONLINE_MASK_KEY]), snapshot)
         for key in wanted:
             if key in self._pack_probes_left:
-                self._learn_pack(key, snapshot.get(key))
+                self._learn_pack(key, snapshot.get(key), snapshot)
         return snapshot
 
     # --- control (write) ----------------------------------------------------

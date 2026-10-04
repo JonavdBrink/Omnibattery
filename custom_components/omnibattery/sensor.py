@@ -26,6 +26,7 @@ from homeassistant.util import dt as dt_util
 from .infra.entity_naming import english_entity_id, system_entity_id, SYSTEM_UNIQUE_ID_PREFIX
 from .const import (
     DOMAIN,
+    PREDICTIVE_MODE_DYNAMIC_PRICING,
     EFFICIENCY_SENSOR_DEFINITIONS,
     STORED_ENERGY_SENSOR_DEFINITIONS,
     CYCLE_SENSOR_DEFINITIONS,
@@ -173,10 +174,13 @@ async def async_setup_entry(
         if not coordinator.capabilities.has_energy_counters:
             for definition in SYNTHETIC_ENERGY_SENSOR_DEFINITIONS:
                 entities.append(SyntheticEnergySensor(coordinator, definition))
-            entities.append(SyntheticCapacitySensor(coordinator))
         elif not coordinator.capabilities.has_daily_energy_counters:
             for definition in CUMULATIVE_DAILY_ENERGY_SENSOR_DEFINITIONS:
                 entities.append(CumulativeDailyEnergySensor(coordinator, definition))
+        # User-configured capacity (Zendure, Sessy, Hoymiles): gated on capacity,
+        # not energy counters — Sessy/Hoymiles have counters but no capacity.
+        if not getattr(coordinator.capabilities, "has_nominal_capacity", True):
+            entities.append(SyntheticCapacitySensor(coordinator))
         pack_specs = getattr(coordinator.driver, "pack_field_specs", None)
         if pack_specs:
             data = coordinator.data or {}
@@ -215,6 +219,12 @@ async def async_setup_entry(
     # Add the three-phase protection status and per-phase diagnostic sensor.
     if controller:
         entities.append(ThreePhaseProtectionSensor(hass, entry, controller))
+
+    # Add high-price discharge status sensor. The feature only runs under
+    # dynamic pricing (control/high_price_discharge.py), so elsewhere this was
+    # a permanently-idle diagnostic.
+    if controller and controller.predictive_charging_mode == PREDICTIVE_MODE_DYNAMIC_PRICING:
+        entities.append(HighPriceDischargeSensor(hass, entry, controller))
 
     # Add weekly full charge status sensor (when weekly charge is enabled)
     if controller and controller.weekly_full_charge_enabled:
@@ -658,6 +668,51 @@ class ThreePhaseProtectionSensor(SensorEntity):
         }
 
 
+class HighPriceDischargeSensor(SensorEntity):
+    """Diagnostic sensor for deliberate export into a price peak (#270)."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
+        """Initialize the high-price discharge status sensor."""
+        self.hass = hass
+        self.entry = entry
+        self._controller = controller
+
+        self._attr_has_entity_name = True
+        self._attr_translation_key = "high_price_discharge_status"
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}high_price_discharge_status"
+        self.entity_id = system_entity_id("sensor", "high_price_discharge_status")
+        self._attr_icon = "mdi:transmission-tower-export"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_should_poll = True
+
+    def _status(self) -> dict:
+        """Return a fresh snapshot so HA attributes reflect the latest plan."""
+        manager = getattr(self._controller, "_high_price_discharge_mgr", None)
+        return manager.get_status() if manager is not None else {"state": "disabled"}
+
+    @property
+    def native_value(self) -> str:
+        """Return the current high-price discharge state."""
+        return str(self._status().get("state", "disabled"))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return the reason, plan and allocation details."""
+        details = self._status()
+        details.pop("state", None)
+        return details
+
+    @property
+    def device_info(self):
+        """Return device information for the system."""
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }
+
+
 class WeeklyFullChargeSensor(SensorEntity):
     """Diagnostic sensor showing weekly full charge status and delay calculations."""
 
@@ -911,6 +966,15 @@ class IntegrationStatusSensor(SensorEntity):
             and not getattr(coordinator, "battery_manual_mode_enabled", False)
         ]
 
+    def _price_reserve_batteries(self) -> list[str]:
+        """Return batteries holding energy back for a dearer hour still ahead."""
+        controller = self._controller
+        return [
+            coordinator.name
+            for coordinator in controller.coordinators
+            if "price_reserve" in controller.get_discharge_blockers(coordinator)
+        ]
+
     def _backup_cooldown_batteries(self) -> list[str]:
         """Return batteries temporarily excluded because backup/offgrid load was active."""
         from homeassistant.util import dt as dt_util
@@ -958,6 +1022,12 @@ class IntegrationStatusSensor(SensorEntity):
             ):
                 return "charging_to_setpoint"
 
+        # Priority 4b: Surplus is deliberately exporting until a cheaper
+        # feed-in window. Ranked after charge delay, which owns the same
+        # blocker while it is active.
+        if "surplus_price_hold" in c.get_charge_blockers():
+            return "surplus_price_hold"
+
         # Priority 5: Operational restrictions and feature overrides
         ev_state = self._ev_charger_state_key()
         if ev_state:
@@ -973,6 +1043,10 @@ class IntegrationStatusSensor(SensorEntity):
         discharge_blockers = c.get_discharge_blockers()
         if "price_discharge" in discharge_blockers:
             return "price_discharge_blocked"
+
+        # Per-battery, so it is not in the global registry above.
+        if self._price_reserve_batteries():
+            return "price_reserve_hold"
 
         hourly_state = self._hourly_balance_state_key()
         if hourly_state:
@@ -1036,6 +1110,9 @@ class IntegrationStatusSensor(SensorEntity):
         battery_discharge_blockers = c.get_battery_discharge_blockers()
         if battery_discharge_blockers:
             attrs["battery_discharge_blockers"] = battery_discharge_blockers
+        solar_only = getattr(c, "_predictive_solar_only_batteries", None)
+        if solar_only:
+            attrs["battery_solar_only_charge"] = dict(solar_only)
         offsets = dict(c._setpoint_offsets)
         if offsets:
             attrs["setpoint_offsets"] = offsets

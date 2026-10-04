@@ -128,6 +128,44 @@ def test_vacation_period_marks_a_partial_legacy_day_as_excluded():
     )
 
 
+@pytest.mark.asyncio
+async def test_exclude_dates_drops_the_day_and_blocks_its_rebuild():
+    """A bad day must leave learning and never come back from a backfill."""
+    history = [
+        (date(2026, 9, 6), 18.0),
+        (date(2026, 9, 7), 49.71),
+        (date(2026, 9, 8), 19.34),
+    ]
+    tracker = _make_tracker(history)
+    tracker._controller._daily_grid_at_min_soc_kwh = 0.0
+    tracker._hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Madrid"))
+    tracker._vacation_periods = []
+    tracker._vacation_nights = []
+    tracker._vacation_save_task = None
+    tracker._consumption_store = _FakeConsumptionStore({})
+    tracker._vacation_store = _FakeConsumptionStore({})
+    excluded = []
+    tracker._consumption_profile = SimpleNamespace(
+        set_excluded_periods=excluded.append
+    )
+
+    await tracker.async_exclude_dates(date(2026, 9, 7), date(2026, 9, 7))
+
+    assert [day for day, _ in tracker._controller._daily_consumption_history] == [
+        date(2026, 9, 6), date(2026, 9, 8),
+    ]
+    # The persisted period is what a later Recorder rebuild honours.
+    madrid = ZoneInfo("Europe/Madrid")
+    assert tracker._period_intersects(
+        datetime(2026, 9, 7, tzinfo=madrid), datetime(2026, 9, 8, tzinfo=madrid)
+    )
+    assert not tracker._period_intersects(
+        datetime(2026, 9, 8, tzinfo=madrid), datetime(2026, 9, 9, tzinfo=madrid)
+    )
+    assert excluded and excluded[-1] == tracker._vacation_periods
+    assert tracker._vacation_store._data["periods"] == tracker._vacation_periods
+
+
 def test_vacation_baseline_ignores_nights_without_three_hours_coverage():
     tracker = _make_tracker([])
     tracker._vacation_nights = [
@@ -137,6 +175,36 @@ def test_vacation_baseline_ignores_nights_without_three_hours_coverage():
     baseline_kw, source = tracker._vacation_baseline_kw()
     assert baseline_kw == pytest.approx(1.0)
     assert source == "vacation_night_median"
+
+
+def test_vacation_baseline_does_not_recurse_through_the_profile_fallback():
+    """#499: the profile's legacy fallback asks the tracker for its daily value.
+
+    While vacation is active that answer *is* the vacation baseline, so the two
+    called each other ~140 deep on every entity read and froze the event loop.
+    """
+    tracker = _make_tracker([(date(2026, 9, 18), 9.6)])
+    tracker._controller.vacation_mode_enabled = True
+    tracker._vacation_nights = []
+    tracker._vacation_periods = []
+    calls = []
+
+    def _forecast_energy_between(start, end, *, exclude_charging_windows, fallback):
+        # What ConsumptionProfileTracker._fallback_daily_value() does, and the
+        # callable is the tracker's own get_avg_daily_consumption (see the
+        # ConsumptionProfileTracker construction in ConsumptionTracker.__init__).
+        calls.append(tracker.get_avg_daily_consumption())
+        return SimpleNamespace(source=fallback, energy_kwh=0.0)
+
+    tracker._consumption_profile = SimpleNamespace(
+        forecast_energy_between=_forecast_energy_between
+    )
+
+    baseline_kw, source = tracker._vacation_baseline_kw()
+
+    assert len(calls) == 1
+    assert calls[0] == pytest.approx(9.6)  # the re-entrant call took the history
+    assert (baseline_kw, source) == (pytest.approx(9.6 / 24.0), "daily_history")
 
 
 def test_vacation_baseline_averages_two_valid_nights():
@@ -289,11 +357,61 @@ async def test_accumulator_counts_power_during_predictive_charge_window(monkeypa
     monkeypatch.setattr(tracker, "get_adjusted_home_power_kw", lambda: 0.5)
 
     import custom_components.omnibattery.tracking.consumption_tracker as ct
-    monkeypatch.setattr(ct, "monotonic", lambda: 3700.0)
+    monkeypatch.setattr(ct, "monotonic", lambda: 280.0)
 
     await tracker.accumulate_household_consumption()
 
-    assert tracker._controller._household_energy_accumulator == pytest.approx(2.5)
+    assert tracker._controller._household_energy_accumulator == pytest.approx(2.025)
+
+
+@pytest.mark.asyncio
+async def test_accumulator_does_not_bill_a_telemetry_outage(monkeypatch):
+    """Issue #427: an unavailable battery must break integration, not backfill it.
+
+    Modbus dies for two hours; the first sample after it must add one cycle of
+    energy, not two hours of the current power level.
+    """
+    tracker = _make_history_tracker([], _MON_FRI)
+    tracker._controller._household_energy_accumulator = 4.0
+    tracker._household_last_accumulation_time = 100.0
+    tracker._consumption_profile = SimpleNamespace(record_power_sample=lambda *a, **kw: None)
+
+    import custom_components.omnibattery.tracking.consumption_tracker as ct
+
+    # Telemetry gone: home power cannot be derived.
+    monkeypatch.setattr(tracker, "get_adjusted_home_power_kw", lambda: None)
+    monkeypatch.setattr(ct, "monotonic", lambda: 200.0)
+    await tracker.accumulate_household_consumption()
+    assert tracker._household_last_accumulation_time is None
+
+    # Two hours later Modbus is back and the house is pulling 3 kW.
+    monkeypatch.setattr(tracker, "get_adjusted_home_power_kw", lambda: 3.0)
+    monkeypatch.setattr(ct, "monotonic", lambda: 7400.0)
+    await tracker.accumulate_household_consumption()
+    assert tracker._controller._household_energy_accumulator == pytest.approx(4.0)
+
+    # Normal cadence resumes and accounts normally.
+    monkeypatch.setattr(ct, "monotonic", lambda: 7460.0)
+    await tracker.accumulate_household_consumption()
+    assert tracker._controller._household_energy_accumulator == pytest.approx(4.05)
+
+
+@pytest.mark.asyncio
+async def test_accumulator_caps_a_stalled_control_loop(monkeypatch):
+    """A long stall with no None sample must not integrate across the gap."""
+    tracker = _make_history_tracker([], _MON_FRI)
+    tracker._controller._household_energy_accumulator = 1.0
+    tracker._household_last_accumulation_time = 100.0
+    tracker._consumption_profile = SimpleNamespace(record_power_sample=lambda *a, **kw: None)
+    monkeypatch.setattr(tracker, "get_adjusted_home_power_kw", lambda: 3.0)
+
+    import custom_components.omnibattery.tracking.consumption_tracker as ct
+    monkeypatch.setattr(ct, "monotonic", lambda: 100.0 + 3 * 3600.0)
+
+    await tracker.accumulate_household_consumption()
+
+    assert tracker._controller._household_energy_accumulator == pytest.approx(1.0)
+    assert tracker._household_last_accumulation_time == pytest.approx(100.0 + 3 * 3600.0)
 
 
 class _FakeConsumptionStore:
@@ -603,6 +721,21 @@ def test_derive_home_counts_connected_discharge():
         {"sensor.grid": _w(300)}, [_battunit(2500)]
     )
     assert tracker._derive_home_power_kw() == pytest.approx(2.8)
+
+
+def test_derive_home_excludes_direct_pv_charging():
+    # Issue #453: the integrated daily total shares the aggregate sensor's source
+    # order. A DC-coupled unit charging 385 W from its own array exchanges nothing
+    # at the AC port, so the house keeps its full 1.311 kW (grid 8 W + 1303 W PV).
+    zendure = FakeCoordinator(
+        data={"battery_power": 385, "ac_delivered_power": 0}
+    )
+    tracker = _make_home_tracker(
+        {"sensor.grid": _w(8), "sensor.solar": _w(1303)},
+        [zendure],
+        solar_sensor="sensor.solar",
+    )
+    assert tracker._derive_home_power_kw() == pytest.approx(1.311)
 
 
 def test_derive_home_cancels_grid_energy_used_to_charge_battery():

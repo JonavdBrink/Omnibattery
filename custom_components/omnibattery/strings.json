@@ -1,5 +1,21 @@
 {
   "issues": {
+    "excluded_device_ev_type": {
+      "title": "Mark your EV charger among excluded devices",
+      "description": "The new energy-flow diagram (switch it on with the button in the flow card header) draws EV chargers on their own cable, next to the car. Omnibattery cannot tell which excluded device is the EV charger, so until you mark it, its power is shown on the other excluded-devices cable (the outdoor unit) and the EV cable stays empty. Open Options → Excluded devices and save your devices again, ticking \"EV charger\" on the charger (leave it unticked on the others). This only affects how the diagram is drawn, not battery control. The notice disappears once the devices have been saved."
+    },
+    "battery_not_delivering": {
+      "title": "Battery {battery} is not delivering power",
+      "description": "{battery} has been accepting charge/discharge commands without delivering power for {minutes} minutes ({reason}). Omnibattery keeps it out of the pool and retries it every {cooldown} minutes, so the rest of the fleet covers the house meanwhile. The battery itself, its Modbus link or the bridge in front of it needs attention: check that it is not sitting in standby under its own app's control, and that the connection is not saturated. Switching Manual Battery Control on and off again for that battery often restores it."
+    },
+    "configured_sensor_missing": {
+      "title": "Configured sensor no longer exists",
+      "description": "Omnibattery is configured with {sensors}, which does not exist in Home Assistant. Every feature that reads it is inactive. The stored reference is kept on purpose, because the entity picker cannot show an entity that is gone and would otherwise clear your setting silently: open Options → Sensors and pick a replacement, or clear the field once the entity is back."
+    },
+    "dead_main_sensor": {
+      "title": "Grid power sensor has stopped publishing",
+      "description": "The configured grid sensor {sensor} has not published a reading for {minutes} minutes. Omnibattery cannot regulate without it, so it is holding its last command of {power} W: past the stale tolerance the controller stops integrating new corrections rather than acting on a reading it knows is old. Charge and discharge limits, SOC blockers and three-phase protection all still apply, so this is not a runaway, but the batteries keep charging or discharging at that fixed power against a house load nobody is reading, until an SOC limit stops them. Note that a sensor frozen on a valid value looks perfectly healthy in Home Assistant: check that {sensor} still updates, and that the integration or bridge behind it has not wedged."
+    },
     "slow_main_sensor": {
       "title": "Grid power sensor updates too slowly",
       "description": "The configured grid sensor {sensor} updates about every {observed_interval} seconds. Updates every {warning_interval} seconds or more are slower than recommended and may reduce regulation quality. Omnibattery still follows the latest reading until it is more than {stale_limit} seconds old. Use a faster sensor if you need tighter real-time control."
@@ -15,6 +31,10 @@
     "solar_forecast_remaining_recommended": {
       "title": "Use a remaining solar forecast",
       "description": "{sensor} is a legacy whole-day solar forecast. Omnibattery still supports it, but past forecast errors can make intraday decisions inaccurate. Configure the provider's \"remaining today\" forecast sensor in Omnibattery options for a more accurate remaining-solar calculation."
+    },
+    "three_phase_sensor_degraded": {
+      "title": "Three-phase protection is running blind on {phase}",
+      "description": "The current sensor {sensor} for {phase} has been unreadable for several minutes ({reason}). Charging on that phase is blocked and its discharge is held at the last measured value, because cutting it would push that phase's current up instead of down. Check that the sensor still reports, and that it reports periodically rather than only when its value changes."
     },
     "three_phase_manual_mode": {
       "title": "Three-phase protection can be bypassed by manual commands",
@@ -106,7 +126,8 @@
           "port": "Modbus Port",
           "slave_id": "Modbus Slave ID",
           "battery_version": "Battery Model",
-          "serial_port": "Serial port (Modbus RTU)"
+          "serial_port": "Serial port (Modbus RTU)",
+          "rs485_gateway": "Reached through an RS485 gateway"
         },
         "data_description": {
           "name": "Descriptive name to identify this battery",
@@ -114,7 +135,8 @@
           "port": "Modbus port (usually 502)",
           "slave_id": "Modbus slave/unit id (default 1). Change only when a Modbus proxy maps several batteries to one IP:port using distinct slave ids.",
           "battery_version": "Select your battery model version. Ev2 for older models, Ev3 for newer models with updated register map, A (Venus A) or D (Venus D) for hybrid inverter models",
-          "serial_port": "USB-RS485 adapter path, e.g. /dev/ttyUSB0 or COM3. Fill this instead of the IP address to use Modbus RTU over serial; leave empty for TCP."
+          "serial_port": "USB-RS485 adapter path, e.g. /dev/ttyUSB0 or COM3. Fill this instead of the IP address to use Modbus RTU over serial; leave empty for TCP.",
+          "rs485_gateway": "Tick when the Modbus TCP connection goes to an RS485 gateway (Elfin EW11, USB-RS485 bridge, ...) instead of the battery's own TCP port. The wait between messages only exists in the battery's TCP server, so dropping it to 30 ms makes polling roughly three times faster on a Venus Ev3/A/D. The wait is applied per battery: on a gateway shared by several batteries the bus carries that many times the traffic, so untick it again if reads start failing or timing out. Leave off when you connect straight to the battery's IP."
         }
       },
       "battery_connection_zendure": {
@@ -317,7 +339,10 @@
           "allow_solar_surplus": "Allow to use solar surplus (do not charge battery)",
           "dynamic_power_control": "Device has dynamic power control",
           "cover_home_when_active": "Cover home while device is active",
-          "ev_charger_no_telemetry": "EV charger without power telemetry"
+          "ev_charger_no_telemetry": "EV charger without power telemetry",
+          "is_ev_charger": "EV charger (flow diagram only)",
+          "remaining_demand_sensor": "Expected remaining demand (kWh)",
+          "remaining_demand_presence_sensor": "Presence entity for the remaining demand (optional)"
         },
         "data_description": {
           "power_sensor": "Numeric power sensor (W) for the device. Optional for EV chargers without power telemetry; existing configurations that stored the charging-state sensor here remain supported.",
@@ -326,7 +351,10 @@
           "allow_solar_surplus": "If checked, the device will be able to consume energy directly from solar panels (surplus) without the battery trying to compensate. Recommended for high consumption devices like EV chargers.",
           "dynamic_power_control": "Enable for devices that automatically adjust their own demand from the grid meter, such as a solar-surplus wallbox. If an activity sensor is configured, Omnibattery yields before power appears; otherwise it reacts to the power sensor. It then uses genuine leftover export.",
           "cover_home_when_active": "Requires Solar Surplus and a solar-production sensor. The battery may cover the home's own load while this device is active; only the device's grid share stays excluded.",
-          "ev_charger_no_telemetry": "✓ CHECKED = Use the Activity / EV charging sensor instead of numeric power telemetry. Existing configurations that placed this state sensor in Device power sensor continue to work. When charging is detected, the battery pauses for 5 minutes; afterwards it may only charge from solar surplus and never discharges for the EV."
+          "ev_charger_no_telemetry": "✓ CHECKED = Use the Activity / EV charging sensor instead of numeric power telemetry. Existing configurations that placed this state sensor in Device power sensor continue to work. When charging is detected, the battery pauses for 5 minutes; afterwards it may only charge from solar surplus and never discharges for the EV.",
+          "is_ev_charger": "Tick it if this device is an electric-vehicle charger. It is used only by the animated energy-flow diagram, to draw the device on the EV charger cable instead of the excluded-devices cable. It does not change how the battery manages the device.",
+          "remaining_demand_sensor": "Optional. Sensor reporting the energy (kWh) this device still expects to consume today, for example sensor.evcc_[loadpoint]_charge_remaining_energy. Predictive charging then reserves that much of the remaining solar forecast for the device instead of assuming the battery receives it. Only used when 'Consumption is included in home consumption sensor' is checked. Devices marked 'EV charger without power telemetry' are skipped: their energy is already inside the consumption forecast, so reserving it would count it twice.",
+          "remaining_demand_presence_sensor": "Only count the expected remaining demand while this entity reports the device as present: on, true, home, connected, plugged or present. Leave empty to always count it. Point it at your charger's connected entity when the upstream keeps reporting a demand with nothing plugged in: evcc reports the energy to the vehicle's SOC target whether or not a car is there, and reserving solar for an absent car takes it from the battery for nothing. An unavailable or unknown entity counts as absent, so a broken sensor stops reserving rather than reserving for a device that may not be there."
         }
       },
       "add_more_excluded_devices": {
@@ -366,17 +394,13 @@
           "start_time_3": "Window 3 — start time (optional)",
           "end_time_3": "Window 3 — end time (optional)",
           "days_3": "Window 3 — days of the week",
-          "solar_forecast_sensor": "Solar forecast sensor (kWh)",
-          "predictive_safety_margin_kwh": "Solar forecast safety margin (kWh)",
-          "predictive_grid_charge_margin_pct": "Predictive grid charge margin (%)"
+          "solar_forecast_sensor": "Solar forecast sensor (kWh)"
         },
         "data_description": {
           "start_time": "Start time of charging window (e.g., 01:00, off-peak tariff)",
           "end_time": "End time of charging window (e.g., 06:00)",
           "days": "Days when grid charging is allowed",
-          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically.",
-          "predictive_safety_margin_kwh": "Extra energy buffer added to the consumption forecast before deciding whether to charge. The same kWh buffer is also reserved as additional anti-curtailment headroom in Dynamic Pricing. Set to 0 to disable (default). Capped at total battery capacity.",
-          "predictive_grid_charge_margin_pct": "Extra % charged from the grid on top of the solar-deficit, to hedge against optimistic solar forecasts. E.g. a 2 kWh grid need at 50% charges 3 kWh. 0 to disable (default). Capped at the gap to max SOC."
+          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically."
         }
       },
       "dynamic_pricing_config": {
@@ -385,40 +409,18 @@
         "data": {
           "price_integration_type": "Price integration",
           "price_sensor": "Electricity price sensor",
-          "max_price_threshold": "Maximum price threshold (optional)",
-          "dp_price_discharge_control": "Only discharge when price is above threshold",
-          "negative_price_charging_enabled": "Enable negative-price opportunistic charging",
-          "smart_predischarge_enabled": "Enable Smart Pre-discharge / Anti-curtailment",
-          "negative_injection_threshold": "Negative injection threshold (currency/kWh)",
-          "predischarge_reserve_soc": "Pre-discharge reserve SOC (%)",
-          "predischarge_export_mode": "Deliberate grid export mode",
-          "solar_forecast_sensor": "Solar forecast sensor (kWh)",
-          "predictive_safety_margin_kwh": "Solar forecast safety margin (kWh)",
-          "predictive_grid_charge_margin_pct": "Predictive grid charge margin (%)"
+          "export_price_sensor": "Export/feed-in price sensor (optional)",
+          "export_price_integration_type": "Export price integration (optional)",
+          "zonneplan_export_bonus_enabled": "Apply Zonneplan export bonus",
+          "solar_forecast_sensor": "Solar forecast sensor (kWh)"
         },
         "data_description": {
           "price_integration_type": "Select your electricity price provider integration. Nord Pool supports both the official Home Assistant integration and HACS. Tibber is service-based, so its price sensor can be left empty.",
           "price_sensor": "Sensor providing electricity prices (e.g., the official Nord Pool current-price sensor, a HACS Nordpool sensor, sensor.esios_pvpc for PVPC, or your CKW sensor for Switzerland)",
-          "max_price_threshold": "Slots above this price will not be selected. When price-gated discharge is enabled, this value is also used as the discharge threshold. Use major currency/kWh: €/kWh for Nordpool/PVPC, CHF/kWh for CKW. HACS Nordpool prices configured in cents are converted automatically. Leave empty to use all slots and use the daily average as the discharge threshold.",
-          "dp_price_discharge_control": "When enabled, the battery only discharges when the current electricity price exceeds the configured maximum price threshold. If no threshold is configured, it uses today's average price computed automatically from the price sensor. If time slots restrict discharge, both conditions must be met.",
-          "negative_price_charging_enabled": "Opt-in dynamic-pricing feature that charges during the most negative import-price slots even when the normal energy forecast does not require grid charging. A solar forecast sensor is not required.",
-          "smart_predischarge_enabled": "Opt-in dynamic-pricing feature. It creates battery headroom before forecast PV surplus reaches a price slot at or below the negative-injection threshold. Existing SOC floors, user limits, time slots, manual ownership, backup and capacity protection remain authoritative.",
-          "negative_injection_threshold": "A future slot is considered at risk when its normalized price is at or below this inclusive threshold and forecast PV exceeds estimated household consumption.",
-          "predischarge_reserve_soc": "Additional SOC floor for pre-discharge. 0 uses each battery's configured minimum and guaranteed minimum SOC floors.",
-          "predischarge_export_mode": "Choose how deliberate grid export creates anti-curtailment headroom. Self-consumption never exports deliberately; Automatic calculates only the power needed; Custom applies the W limit configured in the next step.",
-          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically.",
-          "predictive_safety_margin_kwh": "Extra energy buffer added to the consumption forecast before deciding whether to charge. The same kWh buffer is also reserved as additional anti-curtailment headroom in Dynamic Pricing. Set to 0 to disable (default). Capped at total battery capacity.",
-          "predictive_grid_charge_margin_pct": "Extra % charged from the grid on top of the solar-deficit, to hedge against optimistic solar forecasts. E.g. a 2 kWh grid need at 50% charges 3 kWh. 0 to disable (default). Capped at the gap to max SOC."
-        }
-      },
-      "predischarge_export_limit": {
-        "title": "Anti-curtailment — Custom export limit",
-        "description": "Set the maximum deliberate export to the grid while creating headroom. This is an export limit, not the battery's total discharge power.",
-        "data": {
-          "predischarge_max_export_power_w": "Deliberate grid export limit (W)"
-        },
-        "data_description": {
-          "predischarge_max_export_power_w": "Maximum power that may be deliberately exported to the grid before a solar-risk window. Battery SOC, reserve, hardware power and existing locks remain authoritative."
+          "export_price_sensor": "Sensor providing your export/feed-in prices. Leave empty to use the import price curve, which is correct when export is credited at the import price (net metering).",
+          "export_price_integration_type": "Attribute layout of the export price sensor. Leave empty to reuse the import integration. Tibber is not available here: it is service-based and its cache belongs to the import curve.",
+          "zonneplan_export_bonus_enabled": "Adds €0.02/kWh and 10% to Zonneplan export prices only. Has no effect unless the effective export price integration is Zonneplan.",
+          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically."
         }
       },
       "realtime_price_config": {
@@ -426,21 +428,13 @@
         "description": "Configure the price sensor and threshold. The system reads the current price every few seconds and starts or stops grid charging immediately — no daily schedule needed.",
         "data": {
           "price_sensor": "Electricity price sensor",
-          "max_price_threshold": "Maximum price threshold (optional)",
           "average_price_sensor": "Daily average price sensor (optional)",
-          "rt_price_discharge_control": "Only discharge when price is above threshold",
-          "solar_forecast_sensor": "Solar forecast sensor (kWh)",
-          "predictive_safety_margin_kwh": "Solar forecast safety margin (kWh)",
-          "predictive_grid_charge_margin_pct": "Predictive grid charge margin (%)"
+          "solar_forecast_sensor": "Solar forecast sensor (kWh)"
         },
         "data_description": {
           "price_sensor": "Sensor whose state is the current electricity price (e.g. sensor.esios_pvpc, sensor.nordpool_kwh_es_eur_3_10_0). Any sensor that exposes the current period price as its state works.",
-          "max_price_threshold": "Charging activates when the current price is at or below this value. Use major currency/kWh (e.g. €/kWh for Nordpool/PVPC, CHF/kWh for CKW). HACS Nordpool prices configured in cents are converted automatically. Leave empty if using the daily average sensor below.",
           "average_price_sensor": "If provided, this sensor's state is used as the threshold instead of the fixed value above — useful when your price integration already exposes a daily average. Leave empty to use the fixed threshold.",
-          "rt_price_discharge_control": "When enabled, the battery only discharges when the current electricity price exceeds the threshold (fixed or daily average). If time slots restrict discharge, both conditions must be met.",
-          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. Not required if you already configured this sensor in the initial setup step — it will be used automatically.",
-          "predictive_safety_margin_kwh": "Extra energy buffer added to the consumption forecast before deciding whether to charge. The same kWh buffer is also reserved as additional anti-curtailment headroom in Dynamic Pricing. Set to 0 to disable (default). Capped at total battery capacity.",
-          "predictive_grid_charge_margin_pct": "Extra % charged from the grid on top of the solar-deficit, to hedge against optimistic solar forecasts. E.g. a 2 kWh grid need at 50% charges 3 kWh. 0 to disable (default). Capped at the gap to max SOC."
+          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. Not required if you already configured this sensor in the initial setup step — it will be used automatically."
         }
       },
       "weekly_full_charge": {
@@ -594,7 +588,8 @@
           "port": "Modbus Port",
           "slave_id": "Modbus Slave ID",
           "battery_version": "Battery Model",
-          "serial_port": "Serial port (Modbus RTU)"
+          "serial_port": "Serial port (Modbus RTU)",
+          "rs485_gateway": "Reached through an RS485 gateway"
         },
         "data_description": {
           "name": "Descriptive name to identify this battery",
@@ -602,7 +597,8 @@
           "port": "Modbus port (usually 502)",
           "slave_id": "Modbus slave/unit id (default 1). Change only when a Modbus proxy maps several batteries to one IP:port using distinct slave ids.",
           "battery_version": "Select your battery model version",
-          "serial_port": "USB-RS485 adapter path, e.g. /dev/ttyUSB0 or COM3. Fill this instead of the IP address to use Modbus RTU over serial; leave empty for TCP."
+          "serial_port": "USB-RS485 adapter path, e.g. /dev/ttyUSB0 or COM3. Fill this instead of the IP address to use Modbus RTU over serial; leave empty for TCP.",
+          "rs485_gateway": "Tick when the Modbus TCP connection goes to an RS485 gateway (Elfin EW11, USB-RS485 bridge, ...) instead of the battery's own TCP port. The wait between messages only exists in the battery's TCP server, so dropping it to 30 ms makes polling roughly three times faster on a Venus Ev3/A/D. The wait is applied per battery: on a gateway shared by several batteries the bus carries that many times the traffic, so untick it again if reads start failing or timing out. Leave off when you connect straight to the battery's IP."
         }
       },
       "reconfigure_battery_zendure": {
@@ -724,6 +720,8 @@
       "manual_requires_power": "Manual mode requires the power override tick to be enabled.",
       "no_price_data": "Selected sensor is not a supported price source. Nord Pool: select an entity from the official integration or a HACS sensor with `raw_today`. PVPC: needs `price_00h` … `price_23h`. CKW: needs a `prices` list. EPEX: needs a `data` list. ENTSO-e: needs a `prices_today` list.",
       "tibber_unavailable": "The Tibber integration is not installed, or its `tibber.get_prices` service is unavailable. Install and configure Tibber first.",
+      "export_tibber_unsupported": "Tibber cannot be used for the export price curve: it is service-based and its price cache belongs to the import curve. Choose a sensor-based provider instead.",
+      "export_type_required": "Select the export price integration explicitly. The import curve is service-based, so its type cannot be reused for a sensor.",
       "host_or_serial_required": "Enter either an IP address (TCP) or a serial port path (Modbus RTU).",
       "missing_power_sensor": "Select a device power sensor, or enable EV charger without power telemetry and select an activity sensor.",
       "missing_activity_sensor": "Select an Activity / EV charging sensor for Dynamic Power Control or an EV charger without power telemetry."
@@ -741,6 +739,13 @@
   },
   "options": {
     "step": {
+      "remove_battery": {
+        "title": "Remove a battery",
+        "description": "Choose the battery to remove. Its device and entities are deleted and the integration reloads.",
+        "data": {
+          "battery": "Battery"
+        }
+      },
       "init": {
         "title": "Reconfigure Omnibattery",
         "description": "Select which section you want to configure.",
@@ -812,6 +817,14 @@
         }
       },
       "batteries": {
+        "title": "Batteries",
+        "description": "Add or modify batteries, or remove a specific one.",
+        "menu_options": {
+          "battery_count": "Add / modify batteries",
+          "remove_battery": "Remove a battery"
+        }
+      },
+      "battery_count": {
         "title": "Number of batteries",
         "description": "Modify the number of batteries. If you reduce the number, the last configured batteries will be removed.",
         "data": {
@@ -837,7 +850,8 @@
           "port": "Modbus Port",
           "slave_id": "Modbus Slave ID",
           "battery_version": "Battery Model",
-          "serial_port": "Serial port (Modbus RTU)"
+          "serial_port": "Serial port (Modbus RTU)",
+          "rs485_gateway": "Reached through an RS485 gateway"
         },
         "data_description": {
           "name": "Descriptive name to identify this battery",
@@ -845,7 +859,8 @@
           "port": "Modbus port (usually 502)",
           "slave_id": "Modbus slave/unit id (default 1). Change only when a Modbus proxy maps several batteries to one IP:port using distinct slave ids.",
           "battery_version": "Select your battery model version. Ev2 for older models, Ev3 for newer models with updated register map, A (Venus A) or D (Venus D) for hybrid inverter models",
-          "serial_port": "USB-RS485 adapter path, e.g. /dev/ttyUSB0 or COM3. Fill this instead of the IP address to use Modbus RTU over serial; leave empty for TCP."
+          "serial_port": "USB-RS485 adapter path, e.g. /dev/ttyUSB0 or COM3. Fill this instead of the IP address to use Modbus RTU over serial; leave empty for TCP.",
+          "rs485_gateway": "Tick when the Modbus TCP connection goes to an RS485 gateway (Elfin EW11, USB-RS485 bridge, ...) instead of the battery's own TCP port. The wait between messages only exists in the battery's TCP server, so dropping it to 30 ms makes polling roughly three times faster on a Venus Ev3/A/D. The wait is applied per battery: on a gateway shared by several batteries the bus carries that many times the traffic, so untick it again if reads start failing or timing out. Leave off when you connect straight to the battery's IP."
         }
       },
       "battery_connection_zendure": {
@@ -1009,7 +1024,10 @@
           "allow_solar_surplus": "Allow to use solar surplus (do not charge battery)",
           "dynamic_power_control": "Device has dynamic power control",
           "cover_home_when_active": "Cover home while device is active",
-          "ev_charger_no_telemetry": "EV charger without power telemetry"
+          "ev_charger_no_telemetry": "EV charger without power telemetry",
+          "is_ev_charger": "EV charger (flow diagram only)",
+          "remaining_demand_sensor": "Expected remaining demand (kWh)",
+          "remaining_demand_presence_sensor": "Presence entity for the remaining demand (optional)"
         },
         "data_description": {
           "power_sensor": "Numeric power sensor (W) for the device. Optional for EV chargers without power telemetry; existing configurations that stored the charging-state sensor here remain supported.",
@@ -1018,7 +1036,10 @@
           "allow_solar_surplus": "If checked, the device will be able to consume energy directly from solar panels (surplus) without the battery trying to compensate. Recommended for high consumption devices like EV chargers.",
           "dynamic_power_control": "Enable for devices that automatically adjust their own demand from the grid meter, such as a solar-surplus wallbox. If an activity sensor is configured, Omnibattery yields before power appears; otherwise it reacts to the power sensor. It then uses genuine leftover export.",
           "cover_home_when_active": "Requires Solar Surplus and a solar-production sensor. The battery may cover the home's own load while this device is active; only the device's grid share stays excluded.",
-          "ev_charger_no_telemetry": "✓ CHECKED = Use the Activity / EV charging sensor instead of numeric power telemetry. Existing configurations that placed this state sensor in Device power sensor continue to work. When charging is detected, the battery pauses for 5 minutes; afterwards it may only charge from solar surplus and never discharges for the EV."
+          "ev_charger_no_telemetry": "✓ CHECKED = Use the Activity / EV charging sensor instead of numeric power telemetry. Existing configurations that placed this state sensor in Device power sensor continue to work. When charging is detected, the battery pauses for 5 minutes; afterwards it may only charge from solar surplus and never discharges for the EV.",
+          "is_ev_charger": "Tick it if this device is an electric-vehicle charger. It is used only by the animated energy-flow diagram, to draw the device on the EV charger cable instead of the excluded-devices cable. It does not change how the battery manages the device.",
+          "remaining_demand_sensor": "Optional. Sensor reporting the energy (kWh) this device still expects to consume today, for example sensor.evcc_[loadpoint]_charge_remaining_energy. Predictive charging then reserves that much of the remaining solar forecast for the device instead of assuming the battery receives it. Only used when 'Consumption is included in home consumption sensor' is checked. Devices marked 'EV charger without power telemetry' are skipped: their energy is already inside the consumption forecast, so reserving it would count it twice.",
+          "remaining_demand_presence_sensor": "Only count the expected remaining demand while this entity reports the device as present: on, true, home, connected, plugged or present. Leave empty to always count it. Point it at your charger's connected entity when the upstream keeps reporting a demand with nothing plugged in: evcc reports the energy to the vehicle's SOC target whether or not a car is there, and reserving solar for an absent car takes it from the battery for nothing. An unavailable or unknown entity counts as absent, so a broken sensor stops reserving rather than reserving for a device that may not be there."
         }
       },
       "add_more_excluded_devices": {
@@ -1058,17 +1079,13 @@
           "start_time_3": "Window 3 — start time (optional)",
           "end_time_3": "Window 3 — end time (optional)",
           "days_3": "Window 3 — days of the week",
-          "solar_forecast_sensor": "Solar forecast sensor (kWh)",
-          "predictive_safety_margin_kwh": "Solar forecast safety margin (kWh)",
-          "predictive_grid_charge_margin_pct": "Predictive grid charge margin (%)"
+          "solar_forecast_sensor": "Solar forecast sensor (kWh)"
         },
         "data_description": {
           "start_time": "Start time of charging window (e.g., 01:00, off-peak tariff)",
           "end_time": "End time of charging window (e.g., 06:00)",
           "days": "Days when grid charging is allowed",
-          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically.",
-          "predictive_safety_margin_kwh": "Extra energy buffer added to the consumption forecast before deciding whether to charge. The same kWh buffer is also reserved as additional anti-curtailment headroom in Dynamic Pricing. Set to 0 to disable (default). Capped at total battery capacity.",
-          "predictive_grid_charge_margin_pct": "Extra % charged from the grid on top of the solar-deficit, to hedge against optimistic solar forecasts. E.g. a 2 kWh grid need at 50% charges 3 kWh. 0 to disable (default). Capped at the gap to max SOC."
+          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically."
         }
       },
       "dynamic_pricing_config": {
@@ -1077,40 +1094,18 @@
         "data": {
           "price_integration_type": "Price integration",
           "price_sensor": "Electricity price sensor",
-          "max_price_threshold": "Maximum price threshold (optional)",
-          "dp_price_discharge_control": "Only discharge when price is above threshold",
-          "negative_price_charging_enabled": "Enable negative-price opportunistic charging",
-          "smart_predischarge_enabled": "Enable Smart Pre-discharge / Anti-curtailment",
-          "negative_injection_threshold": "Negative injection threshold (currency/kWh)",
-          "predischarge_reserve_soc": "Pre-discharge reserve SOC (%)",
-          "predischarge_export_mode": "Deliberate grid export mode",
-          "solar_forecast_sensor": "Solar forecast sensor (kWh)",
-          "predictive_safety_margin_kwh": "Solar forecast safety margin (kWh)",
-          "predictive_grid_charge_margin_pct": "Predictive grid charge margin (%)"
+          "export_price_sensor": "Export/feed-in price sensor (optional)",
+          "export_price_integration_type": "Export price integration (optional)",
+          "zonneplan_export_bonus_enabled": "Apply Zonneplan export bonus",
+          "solar_forecast_sensor": "Solar forecast sensor (kWh)"
         },
         "data_description": {
           "price_integration_type": "Select your electricity price provider integration. Nord Pool supports both the official Home Assistant integration and HACS. Tibber is service-based, so its price sensor can be left empty.",
           "price_sensor": "Sensor providing electricity prices (e.g., the official Nord Pool current-price sensor, a HACS Nordpool sensor, sensor.esios_pvpc for PVPC, or your CKW sensor for Switzerland)",
-          "max_price_threshold": "Slots above this price will not be selected. When price-gated discharge is enabled, this value is also used as the discharge threshold. Use major currency/kWh: €/kWh for Nordpool/PVPC, CHF/kWh for CKW. HACS Nordpool prices configured in cents are converted automatically. Leave empty to use all slots and use the daily average as the discharge threshold.",
-          "dp_price_discharge_control": "When enabled, the battery only discharges when the current electricity price exceeds the configured maximum price threshold. If no threshold is configured, it uses today's average price computed automatically from the price sensor. If time slots restrict discharge, both conditions must be met.",
-          "negative_price_charging_enabled": "Opt-in dynamic-pricing feature that charges during the most negative import-price slots even when the normal energy forecast does not require grid charging. A solar forecast sensor is not required.",
-          "smart_predischarge_enabled": "Opt-in dynamic-pricing feature. It creates battery headroom before forecast PV surplus reaches a price slot at or below the negative-injection threshold. Existing SOC floors, user limits, time slots, manual ownership, backup and capacity protection remain authoritative.",
-          "negative_injection_threshold": "A future slot is considered at risk when its normalized price is at or below this inclusive threshold and forecast PV exceeds estimated household consumption.",
-          "predischarge_reserve_soc": "Additional SOC floor for pre-discharge. 0 uses each battery's configured minimum and guaranteed minimum SOC floors.",
-          "predischarge_export_mode": "Choose how deliberate grid export creates anti-curtailment headroom. Self-consumption never exports deliberately; Automatic calculates only the power needed; Custom applies the W limit configured in the next step.",
-          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically.",
-          "predictive_safety_margin_kwh": "Extra energy buffer added to the consumption forecast before deciding whether to charge. The same kWh buffer is also reserved as additional anti-curtailment headroom in Dynamic Pricing. Set to 0 to disable (default). Capped at total battery capacity.",
-          "predictive_grid_charge_margin_pct": "Extra % charged from the grid on top of the solar-deficit, to hedge against optimistic solar forecasts. E.g. a 2 kWh grid need at 50% charges 3 kWh. 0 to disable (default). Capped at the gap to max SOC."
-        }
-      },
-      "predischarge_export_limit": {
-        "title": "Anti-curtailment — Custom export limit",
-        "description": "Set the maximum deliberate export to the grid while creating headroom. This is an export limit, not the battery's total discharge power.",
-        "data": {
-          "predischarge_max_export_power_w": "Deliberate grid export limit (W)"
-        },
-        "data_description": {
-          "predischarge_max_export_power_w": "Maximum power that may be deliberately exported to the grid before a solar-risk window. Battery SOC, reserve, hardware power and existing locks remain authoritative."
+          "export_price_sensor": "Sensor providing your export/feed-in prices. Leave empty to use the import price curve, which is correct when export is credited at the import price (net metering).",
+          "export_price_integration_type": "Attribute layout of the export price sensor. Leave empty to reuse the import integration. Tibber is not available here: it is service-based and its cache belongs to the import curve.",
+          "zonneplan_export_bonus_enabled": "Adds 10% and €0.02/kWh to Zonneplan export prices only. Has no effect unless the effective export price integration is Zonneplan.",
+          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. If you have no solar panels, leave this empty — the system will charge whenever battery energy is not enough for the day. Not required if you already configured this sensor in the initial setup step — it will be used automatically."
         }
       },
       "realtime_price_config": {
@@ -1118,21 +1113,13 @@
         "description": "Configure the price sensor and threshold. The system reads the current price every few seconds and starts or stops grid charging immediately — no daily schedule needed.",
         "data": {
           "price_sensor": "Electricity price sensor",
-          "max_price_threshold": "Maximum price threshold (optional)",
           "average_price_sensor": "Daily average price sensor (optional)",
-          "rt_price_discharge_control": "Only discharge when price is above threshold",
-          "solar_forecast_sensor": "Solar forecast sensor (kWh)",
-          "predictive_safety_margin_kwh": "Solar forecast safety margin (kWh)",
-          "predictive_grid_charge_margin_pct": "Predictive grid charge margin (%)"
+          "solar_forecast_sensor": "Solar forecast sensor (kWh)"
         },
         "data_description": {
           "price_sensor": "Sensor whose state is the current electricity price (e.g. sensor.esios_pvpc, sensor.nordpool_kwh_es_eur_3_10_0). Any sensor that exposes the current period price as its state works.",
-          "max_price_threshold": "Charging activates when the current price is at or below this value. Use major currency/kWh (e.g. €/kWh for Nordpool/PVPC, CHF/kWh for CKW). HACS Nordpool prices configured in cents are converted automatically. Leave empty if using the daily average sensor below.",
           "average_price_sensor": "If provided, this sensor's state is used as the threshold instead of the fixed value above — useful when your price integration already exposes a daily average. Leave empty to use the fixed threshold.",
-          "rt_price_discharge_control": "When enabled, the battery only discharges when the current electricity price exceeds the threshold (fixed or daily average). If time slots restrict discharge, both conditions must be met.",
-          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. Not required if you already configured this sensor in the initial setup step — it will be used automatically.",
-          "predictive_safety_margin_kwh": "Extra energy buffer added to the consumption forecast before deciding whether to charge. The same kWh buffer is also reserved as additional anti-curtailment headroom in Dynamic Pricing. Set to 0 to disable (default). Capped at total battery capacity.",
-          "predictive_grid_charge_margin_pct": "Extra % charged from the grid on top of the solar-deficit, to hedge against optimistic solar forecasts. E.g. a 2 kWh grid need at 50% charges 3 kWh. 0 to disable (default). Capped at the gap to max SOC."
+          "solar_forecast_sensor": "Sensor providing the solar production forecast in kWh (e.g., Solcast). If you have solar panels, configure this sensor — the system will only charge from the grid when solar forecast is insufficient. Not required if you already configured this sensor in the initial setup step — it will be used automatically."
         }
       },
       "weekly_full_charge": {
@@ -1341,6 +1328,8 @@
       "manual_requires_power": "Manual mode requires the power override tick to be enabled.",
       "no_price_data": "Selected sensor is not a supported price source. Nord Pool: select an entity from the official integration or a HACS sensor with `raw_today`. PVPC: needs `price_00h` … `price_23h`. CKW: needs a `prices` list. EPEX: needs a `data` list. ENTSO-e: needs a `prices_today` list.",
       "tibber_unavailable": "The Tibber integration is not installed, or its `tibber.get_prices` service is unavailable. Install and configure Tibber first.",
+      "export_tibber_unsupported": "Tibber cannot be used for the export price curve: it is service-based and its price cache belongs to the import curve. Choose a sensor-based provider instead.",
+      "export_type_required": "Select the export price integration explicitly. The import curve is service-based, so its type cannot be reused for a sensor.",
       "host_or_serial_required": "Enter either an IP address (TCP) or a serial port path (Modbus RTU).",
       "missing_power_sensor": "Select a device power sensor, or enable EV charger without power telemetry and select an activity sensor.",
       "missing_activity_sensor": "Select an Activity / EV charging sensor for Dynamic Power Control or an EV charger without power telemetry."
@@ -1400,19 +1389,22 @@
         "ckw": "CKW (Switzerland)",
         "epex": "EPEX Spot (e.g. aWATTar)",
         "entsoe": "ENTSO-e (Transparency Platform)",
+        "zonneplan": "Zonneplan",
         "tibber": "Tibber (service-based)"
-      }
-    },
-    "predischarge_export_mode": {
-      "options": {
-        "self_consumption": "Self-consumption only",
-        "automatic": "Automatic",
-        "custom": "Custom limit"
       }
     }
   },
   "entity": {
     "switch": {
+      "surplus_price_hold": {
+        "name": "Surplus Price Hold"
+      },
+      "discharge_reserve": {
+        "name": "Discharge Reserve"
+      },
+      "primary_feedforward": {
+        "name": "Feed the real demand forward"
+      },
       "manual_mode": {
         "name": "Manual Mode"
       },
@@ -1500,7 +1492,7 @@
       "weekly_full_charge_enabled": {
         "name": "Weekly Full Charge"
       },
-      "dp_price_discharge_control": {
+      "price_discharge_control": {
         "name": "Price-Based Discharge"
       },
       "smart_predischarge": {
@@ -1508,9 +1500,6 @@
       },
       "negative_price_charging": {
         "name": "Negative-price opportunistic charging"
-      },
-      "rt_price_discharge_control": {
-        "name": "Price-Based Discharge"
       },
       "lamp_switch": {
         "name": "Status LEDs"
@@ -1595,6 +1584,8 @@
           "grid_charging": "Charging from Grid",
           "weekly_full_charge": "Weekly Full Charge",
           "charge_delayed": "Charge Delayed",
+          "surplus_price_hold": "Surplus Exporting (Cheaper Window Ahead)",
+          "price_reserve_hold": "Holding Charge for Dearer Hours",
           "waiting_for_solar": "Waiting for Solar",
           "charging_to_setpoint": "Charging to Setpoint",
           "capacity_protection": "Capacity Protection",
@@ -1639,8 +1630,22 @@
           "charging_to_setpoint": "Charging to setpoint"
         }
       },
+      "high_price_discharge_status": {
+        "name": "High-Price Sale Status",
+        "state": {
+          "disabled": "Disabled",
+          "invalid_configuration": "Invalid configuration",
+          "no_data": "No data",
+          "blocked": "Blocked",
+          "waiting": "Waiting",
+          "active": "Active"
+        }
+      },
       "battery_soc": {
         "name": "Battery SOC"
+      },
+      "battery_soh": {
+        "name": "Battery State of Health (SoH)"
       },
       "battery_soc_pack_1": {
         "name": "Battery SOC Pack 1"
@@ -1659,6 +1664,51 @@
       },
       "battery_soc_pack_6": {
         "name": "Battery SOC Pack 6"
+      },
+      "battery_soc_pack_7": {
+        "name": "Battery SOC Pack 7"
+      },
+      "max_cell_voltage_pack_1": {
+        "name": "Max Cell Voltage Pack 1"
+      },
+      "min_cell_voltage_pack_1": {
+        "name": "Min Cell Voltage Pack 1"
+      },
+      "max_cell_voltage_pack_2": {
+        "name": "Max Cell Voltage Pack 2"
+      },
+      "min_cell_voltage_pack_2": {
+        "name": "Min Cell Voltage Pack 2"
+      },
+      "max_cell_voltage_pack_3": {
+        "name": "Max Cell Voltage Pack 3"
+      },
+      "min_cell_voltage_pack_3": {
+        "name": "Min Cell Voltage Pack 3"
+      },
+      "max_cell_voltage_pack_4": {
+        "name": "Max Cell Voltage Pack 4"
+      },
+      "min_cell_voltage_pack_4": {
+        "name": "Min Cell Voltage Pack 4"
+      },
+      "max_cell_voltage_pack_5": {
+        "name": "Max Cell Voltage Pack 5"
+      },
+      "min_cell_voltage_pack_5": {
+        "name": "Min Cell Voltage Pack 5"
+      },
+      "max_cell_voltage_pack_6": {
+        "name": "Max Cell Voltage Pack 6"
+      },
+      "min_cell_voltage_pack_6": {
+        "name": "Min Cell Voltage Pack 6"
+      },
+      "max_cell_voltage_pack_7": {
+        "name": "Max Cell Voltage Pack 7"
+      },
+      "min_cell_voltage_pack_7": {
+        "name": "Min Cell Voltage Pack 7"
       },
       "battery_total_energy": {
         "name": "Battery Total Energy"
@@ -1977,6 +2027,12 @@
       "curtailment_status": {
         "name": "Smart Pre-discharge Status"
       },
+      "surplus_price_hold_status": {
+        "name": "Surplus Price Hold Status"
+      },
+      "discharge_reserve_status": {
+        "name": "Discharge Reserve Status"
+      },
       "wifi_status": {
         "name": "WiFi Status"
       },
@@ -2106,6 +2162,26 @@
           "sunday": "Sunday"
         }
       },
+      "charge_priority": {
+        "name": "Charge priority",
+        "state": {
+          "automatic": "Automatic (by hours to full)"
+        }
+      },
+      "primary_battery": {
+        "name": "Primary battery",
+        "state": {
+          "automatic": "Automatic (fullest first)"
+        }
+      },
+      "high_price_sale": {
+        "name": "High-Price Sale",
+        "state": {
+          "off": "Off",
+          "surplus": "Surplus only",
+          "surplus_arbitrage": "Surplus + arbitrage (buy back later)"
+        }
+      },
       "pd_tuning_profile": {
         "name": "PD Tuning Profile",
         "state": {
@@ -2119,6 +2195,12 @@
       }
     },
     "number": {
+      "surplus_hold_min_saving": {
+        "name": "Surplus Hold Minimum Saving"
+      },
+      "discharge_reserve_min_saving": {
+        "name": "Discharge Reserve Minimum Saving"
+      },
       "excluded_device_exclusion_pct": {
         "name": "{device} – Exclusion %"
       },
@@ -2221,9 +2303,6 @@
       "predictive_safety_margin_kwh": {
         "name": "Solar Forecast Safety Margin"
       },
-      "predictive_grid_charge_margin_pct": {
-        "name": "Predictive Grid Charge Margin"
-      },
       "predictive_min_soc_floor": {
         "name": "Guaranteed Minimum SOC"
       },
@@ -2259,9 +2338,6 @@
       },
       "predischarge_reserve_soc": {
         "name": "Pre-discharge Reserve SOC"
-      },
-      "predischarge_max_export_power_w": {
-        "name": "Deliberate Grid Export Limit"
       }
     },
     "button": {
@@ -2269,13 +2345,35 @@
         "name": "Reset Device"
       },
       "reevaluate_dynamic_pricing": {
-        "name": "Re-evaluate Dynamic Pricing"
+        "name": "Re-evaluate Predictive Charging"
       }
     }
   },
   "exceptions": {
+    "exclude_days_invalid_range": {
+      "message": "The end date cannot be earlier than the start date."
+    },
+    "exclude_days_too_old": {
+      "message": "Consumption learning only keeps the last {days} days, so an older day can no longer be excluded."
+    },
     "manual_control_required": {
       "message": "{battery} is under automatic control, so Force Mode and the charge/discharge setpoints are rewritten every control cycle. Enable Manual Mode (system-wide or for this battery) before commanding it directly."
+    }
+  },
+  "services": {
+    "exclude_consumption_days": {
+      "name": "Exclude consumption days",
+      "description": "Keeps whole local days out of the learned consumption, for a day that does not represent the household: a meter outage, a one-off event, a stay away from home. Physical energy counters and history are untouched; only learning ignores the days. The exclusion is persisted, so a later Recorder backfill cannot bring the days back.",
+      "fields": {
+        "start_date": {
+          "name": "Start date",
+          "description": "First local day to exclude."
+        },
+        "end_date": {
+          "name": "End date",
+          "description": "Last local day to exclude. Defaults to the start date, excluding a single day."
+        }
+      }
     }
   }
 }
