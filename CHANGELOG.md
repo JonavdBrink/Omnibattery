@@ -10,6 +10,10 @@
 - **Time Slot: a cleared second or third charging window came back** (#547): emptying a window's start and end in the options now removes it. Thanks to @schauveau.
 - **Panel: daily timeline failed to render without Charge Delay data** (#549). Thanks to @thijskaspers.
 
+### Changed
+
+- **Docs: driver guide lists every file a new battery driver touches**, plus the brand branches in shared code that should become capabilities.
+
 ## [1.5.0] - 2026-10-04
 
 ### Added
