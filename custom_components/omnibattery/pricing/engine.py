@@ -948,8 +948,8 @@ class PricingManager:
         return [
             slot._replace(
                 price=(
-                    slot.price * (1 + ZONNEPLAN_EXPORT_BONUS_RATE)
-                    + ZONNEPLAN_EXPORT_BONUS_FIXED_EUR_PER_KWH
+                    (slot.price + ZONNEPLAN_EXPORT_BONUS_FIXED_EUR_PER_KWH)
+                    * (1 + ZONNEPLAN_EXPORT_BONUS_RATE)
                 )
             )
             for slot in slots

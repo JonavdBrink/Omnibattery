@@ -103,7 +103,7 @@ def test_shared_dispatch_and_stringified_forecast():
 
 
 @pytest.mark.parametrize("explicit_export_type", [None, "zonneplan"])
-@pytest.mark.parametrize("bonus_enabled, expected_export_price", [(False, 0.1), (True, 0.13)])
+@pytest.mark.parametrize("bonus_enabled, expected_export_price", [(False, 0.1), (True, 0.132)])
 def test_independent_export_curve_uses_shared_dispatch(
     explicit_export_type, bonus_enabled, expected_export_price
 ):
