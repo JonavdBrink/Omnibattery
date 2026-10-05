@@ -35,6 +35,9 @@ from .mac_tracking import normalise_mac
 
 _LOGGER = logging.getLogger(__name__)
 
+# Minimum gap between rewrites of a power ceiling the device reports as 0.
+POWER_LIMIT_RESTORE_COOLDOWN_S = 60.0
+
 # Logical telemetry keys _measured_battery_power() / _coordinator_delivered_power()
 # read to see what a battery is actually delivering (see __init__.py). A read
 # group is boosted to the transient fast-poll cadence only if it contains one of
@@ -149,7 +152,7 @@ def _persist_device_cap(coordinator, key: str, value: int) -> None:
     persist(key, int(value))
 
 
-def _sync_device_reported_limits(coordinator) -> None:
+def _sync_device_reported_limits(coordinator) -> tuple[str, ...]:
     """Adopt the power ceilings the device reports, ignoring a zero.
 
     A reported ceiling of zero is not a limit, it is a missing answer. A
@@ -158,16 +161,19 @@ def _sync_device_reported_limits(coordinator) -> None:
     neither charge nor discharge, and nothing would ever write those
     registers again, because the controller had stopped addressing a
     battery it believed could do nothing. The last good figure stands
-    instead, and the mismatch is worth a line in the log.
+    instead. Returns the keys that read 0 so the caller can write the
+    ceiling back: a Venus D on EMS V151 honours the zeroed register and
+    refuses to discharge until it is rewritten (issue #548).
     """
-    for key in ("max_charge_power", "max_discharge_power"):
-        if key in coordinator.data and not coordinator.data[key]:
-            _LOGGER.warning(
-                "[%s] Device reports %s = 0; keeping the last known ceiling. "
-                "The battery may have lost its limits on a restart — writing "
-                "the corresponding number entity restores them.",
-                coordinator.name, key,
-            )
+    zeroed = tuple(
+        key for key in ("max_charge_power", "max_discharge_power")
+        if key in coordinator.data and not coordinator.data[key]
+    )
+    for key in zeroed:
+        _LOGGER.warning(
+            "[%s] Device reports %s = 0; keeping the last known ceiling.",
+            coordinator.name, key,
+        )
     if coordinator.data.get("max_charge_power"):
         device_cap = int(coordinator.data["max_charge_power"])
         # Soft-max drivers (Zendure telemetry, Anker read-only sensor) and
@@ -211,6 +217,7 @@ def _sync_device_reported_limits(coordinator) -> None:
                 if coordinator.needs_software_max_discharge or coordinator.needs_software_power_cap
                 else device_cap
             )
+    return zeroed
 
 
 def group_scan_interval_s(
@@ -402,6 +409,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         self._configured_max_discharge_power = initial_discharge_limit
         self._effective_max_charge_power = initial_charge_limit
         self._effective_max_discharge_power = initial_discharge_limit
+        self._power_limit_restored_at: dict[str, float] = {}
         self.max_soc = max_soc
         self.min_soc = min_soc
         # Hysteresis is mandatory; floor the percent so SOC drift can't shrink the
@@ -1655,7 +1663,8 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         # coordinator.min_soc stays at the construction default across restarts.
         if "min_soc" in self.data:
             self.min_soc = int(self.data["min_soc"])
-        _sync_device_reported_limits(self)
+        for key in _sync_device_reported_limits(self):
+            await self._restore_zeroed_power_limit(key)
         _stamp_native_daily_reset_dates(self)
 
         if updated_data:
@@ -1731,6 +1740,29 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             # Default to sensor if not found (telemetry-only / soft-max keys)
             return "sensor"
+
+    async def _restore_zeroed_power_limit(self, key: str) -> None:
+        """Write back a power ceiling the device reports as 0 (issue #548).
+
+        Only for drivers whose ceiling is a writable number entity; elsewhere
+        the reading is telemetry. Rate-limited so a link that is still
+        flapping after a reconnect does not turn into a write storm.
+        """
+        if not any(d["key"] == key for d in self.number_definitions):
+            return
+        now = time.monotonic()
+        if now - self._power_limit_restored_at.get(key, float("-inf")) < POWER_LIMIT_RESTORE_COOLDOWN_S:
+            return
+        self._power_limit_restored_at[key] = now
+        charge = key == "max_charge_power"
+        # Venus E v2/v3: the register holds the device cap (800|2500), not the
+        # user's limit, so restore the last cap the device reported.
+        if self.needs_software_power_cap:
+            value = self.device_max_charge_power if charge else self.device_max_discharge_power
+        else:
+            value = self.configured_max_charge_power if charge else self.configured_max_discharge_power
+        if await self.write_control(key, value, do_refresh=False):
+            _LOGGER.warning("[%s] Restored %s to %d W", self.name, key, value)
 
     async def write_control(self, key: str, value: int, do_refresh: bool = True):
         """Command a single logical control to a wire value via the driver.

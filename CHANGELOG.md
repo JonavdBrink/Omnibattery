@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **Marstek Venus D: no discharge after a Modbus reconnect** (#548): when the battery reports its max charge/discharge power as 0 W, the configured limit is now written back automatically (at most once a minute) instead of waiting for a manual rewrite. Thanks to @mxmrlt.
 - **Hoymiles: Battery Cycle Count stuck at 0** (#557): the battery only reports daily energy, so lifetime charge/discharge totals are now integrated from power. Thanks to @adonix31.
 - **Zendure SolarFlow 800 / Plus / Pro: PV not counted in System Solar Power or Daily Solar Production** (#556). Thanks to @adonix31.
 
