@@ -171,8 +171,15 @@ async def async_setup_entry(
         # Drivers without hardware energy counters (Zendure): synthesise the
         # charge/discharge energy totals by integrating power, and expose per-pack
         # telemetry sized to the live pack count (the first refresh already ran).
+        # Hoymiles reports native daily counters only, so just the lifetime
+        # totals are synthesised there.
         if not coordinator.capabilities.has_energy_counters:
             for definition in SYNTHETIC_ENERGY_SENSOR_DEFINITIONS:
+                if (
+                    definition["period"] == "daily"
+                    and coordinator.capabilities.has_daily_energy_counters
+                ):
+                    continue
                 entities.append(SyntheticEnergySensor(coordinator, definition))
         elif not coordinator.capabilities.has_daily_energy_counters:
             for definition in CUMULATIVE_DAILY_ENERGY_SENSOR_DEFINITIONS:

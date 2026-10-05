@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.1] - Unreleased
+
+### Fixed
+
+- **Hoymiles: Battery Cycle Count stuck at 0** (#557): the battery only reports daily energy, so lifetime charge/discharge totals are now integrated from power. Thanks to @adonix31.
+
 ## [1.5.0] - 2026-10-04
 
 ### Added
