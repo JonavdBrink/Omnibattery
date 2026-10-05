@@ -726,6 +726,8 @@ class ChargeDischargeController:
         # Latched while there is a surplus to spare, so a cloud edge cannot toggle
         # the battery in step with the light.
         self._surplus_guard_latched = False
+        # When the surplus that would latch it was first seen (None: not seen).
+        self._surplus_guard_since = None
         # Whether today's forecast is expected to fill the DC-coupled battery.
         # Latched so a wandering forecast cannot reshuffle the charge order.
         self._scarce_solar_latched = False
