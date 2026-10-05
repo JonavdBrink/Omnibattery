@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Hoymiles: Battery Cycle Count stuck at 0** (#557): the battery only reports daily energy, so lifetime charge/discharge totals are now integrated from power. Thanks to @adonix31.
+- **Zendure SolarFlow 800 / Plus / Pro: PV not counted in System Solar Power or Daily Solar Production** (#556). Thanks to @adonix31.
 
 ## [1.5.0] - 2026-10-04
 
