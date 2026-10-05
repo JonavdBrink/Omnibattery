@@ -7617,6 +7617,14 @@ class ChargeDischargeController:
             seen = True
         return total if seen else None
 
+    def _delivered_power_reliable(self) -> bool:
+        """False when any automatic battery's delivered-power telemetry lags reality (#522)."""
+        return all(
+            getattr(getattr(c, "capabilities", None), "delivered_power_reliable", True)
+            for c in self.coordinators
+            if not ChargeDischargeController._is_battery_manual_owned(c)
+        )
+
     def _backcalc_is_saturated(self, is_charging: bool) -> bool:
         """Return True when the command shortfall is explained by real limits.
 
@@ -8123,13 +8131,19 @@ class ChargeDischargeController:
             # saturation — re-anchor after a few cycles. Slow path: no known
             # limit (likely actuator ramp lag), so only re-anchor after a long
             # sustained shortfall as a windup safety net for unmodelled derate.
+            # The slow path is skipped when the telemetry itself lags (Anker,
+            # #522): the "shortfall" is then a stale reading, and re-anchoring
+            # to it yanks the command back every ~15 s and makes the loop hunt.
             if saturated:
                 self._saturation_cycles += 1
             else:
                 self._saturation_cycles = 0
             if (
                 saturated and self._saturation_cycles >= self.saturation_backcalc_cycles
-            ) or sustained_s >= self.saturation_backcalc_fallback_s:
+            ) or (
+                sustained_s >= self.saturation_backcalc_fallback_s
+                and self._delivered_power_reliable()
+            ):
                 _LOGGER.debug(
                     "PD anti-windup: re-anchoring base %.0fW -> measured %.0fW "
                     "(shortfall %.0fW, saturated=%s, sustained %.0fs)",
@@ -9479,7 +9493,13 @@ class ChargeDischargeController:
                     "No-PD direct tracking: error=%.1fW, previous=%.1fW, new=%.1fW",
                     error, self.previous_power, new_power,
                 )
-        elif not stale_safety_recalc and self._check_feedforward_step(error):
+        elif (
+            not stale_safety_recalc
+            # The deadbeat anchors on measured power; a lagging reading (#522)
+            # would turn it into a wrong-sized kick, so the PD covers the step.
+            and self._delivered_power_reliable()
+            and self._check_feedforward_step(error)
+        ):
             # Confirmed load step: one deadbeat cycle (measured - error), then the
             # PD resumes fine adjustment. Skips the rate limiter on purpose (a
             # 400W/s clamp would forfeit the burst response) but keeps the

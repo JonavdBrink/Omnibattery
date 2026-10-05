@@ -146,6 +146,7 @@ def _main_controller(state_holder, pd_calls):
         _refresh_effective_system_capacities=lambda: None,
         no_pd_mode_enabled=False,
         _check_feedforward_step=lambda _error: False,
+        _delivered_power_reliable=lambda: True,
         _compute_pd_new_power=_pd,
         _apply_zero_cross_hold=lambda power, _error, stale_recalc=False: power,
         _apply_min_power=lambda power, _error: power,
