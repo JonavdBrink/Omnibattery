@@ -118,7 +118,9 @@ def test_independent_export_curve_uses_shared_dispatch(
         "sensor.export": SimpleNamespace(state="0.1", attributes={"forecast": [entry(amount=1000000)]}),
     }
     manager = PricingManager(SimpleNamespace(states=SimpleNamespace(get=states.get)), controller)
-    assert manager.get_future_export_price_slots(datetime(2999, 1, 2))[0].price == expected_export_price
+    assert manager.get_future_export_price_slots(datetime(2999, 1, 2))[0].price == pytest.approx(
+        expected_export_price
+    )
     assert controller._price_data_status == "ok"
     assert manager.get_future_price_slots(datetime(2999, 1, 2))[0].price == pytest.approx(0.3579015)
 
