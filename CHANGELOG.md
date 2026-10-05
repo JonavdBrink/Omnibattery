@@ -8,6 +8,7 @@
 - **Hoymiles: Battery Cycle Count stuck at 0** (#557): the battery only reports daily energy, so lifetime charge/discharge totals are now integrated from power. Thanks to @adonix31.
 - **Zendure SolarFlow 800 / Plus / Pro: PV not counted in System Solar Power or Daily Solar Production** (#556). Thanks to @adonix31.
 - **Time Slot: a cleared second or third charging window came back** (#547): emptying a window's start and end in the options now removes it. Thanks to @schauveau.
+- **Panel: daily timeline failed to render without Charge Delay data** (#549). Thanks to @thijskaspers.
 
 ## [1.5.0] - 2026-10-04
 
