@@ -839,8 +839,12 @@ def _charging_window_schema_fields(existing_windows: list[dict]) -> dict:
         existing = existing_windows[i - 1] if i - 1 < len(existing_windows) else None
         req = vol.Required if i == 1 else vol.Optional
         if existing:
-            fields[req(f"start_time{sfx}", default=existing["start_time"])] = TimeSelector()
-            fields[req(f"end_time{sfx}", default=existing["end_time"])] = TimeSelector()
+            # Rows 2..N are clearable: a default would restore a row the user just emptied (#547).
+            def prefill(value):
+                return {"default": value} if i == 1 else {"description": {"suggested_value": value}}
+
+            fields[req(f"start_time{sfx}", **prefill(existing["start_time"]))] = TimeSelector()
+            fields[req(f"end_time{sfx}", **prefill(existing["end_time"]))] = TimeSelector()
             fields[vol.Optional(f"days{sfx}", default=existing.get("days", _ALL_WEEKDAYS))] = days_selector
         else:
             fields[req(f"start_time{sfx}")] = TimeSelector()

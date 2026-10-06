@@ -655,6 +655,12 @@ GUARD_PENDING_TOLERANCE_W = 100
 # meter noise, so a cloud edge does not toggle the battery every cycle; release
 # has no band at all, because by then the house genuinely needs the battery.
 SURPLUS_GUARD_HYSTERESIS_W = 100
+# How long that surplus has to persist before the guard latches. The figure mixes
+# a meter reading with battery readings polled seconds apart: a battery just told
+# to ramp up still reports its old output while the meter already sees the new
+# one, and reads as a surplus for one sample. The effective window is
+# max(this, 2 * slowest actuator_latency_s), as for the zero-cross hold.
+SURPLUS_GUARD_MIN_HOLD_S = 5.0
 # How far the outlook has to move before the scarce/ample verdict flips. A
 # forecast wanders all day; without this the charge order would follow it.
 SCARCITY_HYSTERESIS_KWH = 2.0

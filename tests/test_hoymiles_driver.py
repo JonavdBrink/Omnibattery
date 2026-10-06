@@ -69,6 +69,9 @@ async def test_mqtt_telemetry_uses_aggregate_values_and_inverts_wire_sign(mqtt_m
     assert driver.capabilities.max_charge_power_w == driver.capabilities.max_discharge_power_w == 1800
     assert driver.capabilities.actuator_latency_s == 1.8
     assert driver.capabilities.readback_latency_s == 4.0
+    # #557: daily counters only -> lifetime totals must be synthesised.
+    assert driver.capabilities.has_energy_counters is False
+    assert driver.capabilities.has_daily_energy_counters is True
     mqtt_mock.callbacks[driver._quick_topic](SimpleNamespace(payload="not json"))
     assert (await driver.read_telemetry())["battery_soc"] == 50
     await driver.close()

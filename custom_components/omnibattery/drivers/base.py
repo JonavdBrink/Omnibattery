@@ -120,6 +120,20 @@ class DriverCapabilities:
     # than warning — the retry still confirms it. Defaults True.
     setpoint_confirm_reliable: bool = True
 
+    # True if the reported delivered power tracks the real AC output closely
+    # enough to anchor control on. Anker reports 0 W or lagging values for
+    # seconds after a setpoint change (#522), so the PD skips the measured-power
+    # anchors that have no real limit behind them (the timed anti-windup
+    # fallback and the feedforward deadbeat). Defaults True.
+    delivered_power_reliable: bool = True
+
+    # True if the AC port and the cell terminal are measured independently, so
+    # their power difference is the real conversion loss. The efficiency sensor
+    # integrates the two planes on PV units only when this holds. Zendure reports
+    # identical AC and cell power while discharging, which reads as 100% (#556),
+    # so it keeps the cumulative charge/discharge counters. Defaults True.
+    independent_power_planes: bool = True
+
     # Approximate physical response time (seconds) after issuing a setpoint. The
     # zero-cross guard uses it to avoid commanding the opposite direction while
     # the previous command is still taking effect. Readback freshness is declared

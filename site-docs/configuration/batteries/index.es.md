@@ -37,11 +37,20 @@ La opción LilyGo es una vía de conexión independiente para una batería Marst
 | **Name** | Identifica la batería en Home Assistant y en el panel de Omnibattery. |
 | **Max charge power** / **Max discharge power** | Limita lo que Omnibattery puede solicitar. Un límite de hardware comunicado por el dispositivo puede reducir el valor efectivo. |
 | **Max SOC** / **Min SOC** | Establece el límite superior de carga y el límite inferior de descarga. SOC significa estado de carga. |
-| **Charge hysteresis** | Evita ciclos rápidos tras llegar la batería a su límite superior. El mínimo es del 2%. |
+| **Charge hysteresis** | Evita ciclos rápidos tras llegar la batería a su límite superior. El mínimo es del 2%; consulta la [histéresis de carga](#histeresis-de-carga). |
 | **Backup Offgrid Threshold** | Mantiene una batería fuera del control automático mientras su salida de respaldo alimenta una carga por encima de este valor. |
 | **Nominal capacity** | Activa los cálculos de energía almacenada y eficiencia cuando la batería no comunica su capacidad. |
 
 La integración crea controles en tiempo de ejecución para los límites de estado de carga y potencia, así que puedes ajustarlos sin volver a ejecutar el asistente de configuración. **Battery Manual Control** reserva una batería para tus propias órdenes de carga, descarga o reposo; consulta el [control manual en una instalación con varias baterías](../../features/multi-battery.md#control-manual-por-bateria).
+
+## Histéresis de carga
+
+Cuando una batería llega a su límite superior, Omnibattery anota el SOC de ese momento y deja de cargarla. La carga solo se reanuda cuando el SOC baja **por debajo** de ese valor menos la histéresis. Con un SOC máximo del 90% y el 2% predeterminado, la batería vuelve a cargar solo cuando su SOC está por debajo del 88%.
+
+El mínimo del 2% es deliberado y no se puede reducir. Cerca del tope, el SOC que comunica la batería oscila y suele cambiar a saltos de un punto entero. Con un margen menor, ese ruido bastaría para reanudar la carga una y otra vez en el límite superior. Cada reanudación activa y desactiva el relé de la batería; evitar esos ciclos continuos reduce su desgaste y preserva la vida útil de la batería.
+
+!!! note "Autoconsumo en el tope"
+    Algunas baterías, como algunos modelos de Anker, consumen un poco de su propia energía en reposo. Una vez llenas, su SOC puede bajar poco a poco del 90% al 88% sin descargar hacia la vivienda. Es lo esperado: la batería sigue dentro de la banda de histéresis y Omnibattery no la recarga. Si quieres que termine el día más alta, sube el **SOC máximo** en lugar de intentar quitar la histéresis.
 
 ## Si la vía de batería no está clara
 
