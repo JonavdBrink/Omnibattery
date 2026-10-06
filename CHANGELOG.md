@@ -15,6 +15,7 @@
 
 ### Changed
 
+- **Faster startup with several batteries** (#560): batteries on different hosts now connect and configure in parallel instead of one after another; batteries sharing a gateway still go in turn. Thanks to @sphings79.
 - **Docs: driver guide lists every file a new battery driver touches**, plus the brand branches in shared code that should become capabilities.
 
 ## [1.5.0] - 2026-10-04
