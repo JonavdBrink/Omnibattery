@@ -726,6 +726,8 @@ class ChargeDischargeController:
         # Latched while there is a surplus to spare, so a cloud edge cannot toggle
         # the battery in step with the light.
         self._surplus_guard_latched = False
+        # When the surplus that would latch it was first seen (None: not seen).
+        self._surplus_guard_since = None
         # Whether today's forecast is expected to fill the DC-coupled battery.
         # Latched so a wandering forecast cannot reshuffle the charge order.
         self._scarce_solar_latched = False
@@ -7617,6 +7619,14 @@ class ChargeDischargeController:
             seen = True
         return total if seen else None
 
+    def _delivered_power_reliable(self) -> bool:
+        """False when any automatic battery's delivered-power telemetry lags reality (#522)."""
+        return all(
+            getattr(getattr(c, "capabilities", None), "delivered_power_reliable", True)
+            for c in self.coordinators
+            if not ChargeDischargeController._is_battery_manual_owned(c)
+        )
+
     def _backcalc_is_saturated(self, is_charging: bool) -> bool:
         """Return True when the command shortfall is explained by real limits.
 
@@ -8123,13 +8133,19 @@ class ChargeDischargeController:
             # saturation — re-anchor after a few cycles. Slow path: no known
             # limit (likely actuator ramp lag), so only re-anchor after a long
             # sustained shortfall as a windup safety net for unmodelled derate.
+            # The slow path is skipped when the telemetry itself lags (Anker,
+            # #522): the "shortfall" is then a stale reading, and re-anchoring
+            # to it yanks the command back every ~15 s and makes the loop hunt.
             if saturated:
                 self._saturation_cycles += 1
             else:
                 self._saturation_cycles = 0
             if (
                 saturated and self._saturation_cycles >= self.saturation_backcalc_cycles
-            ) or sustained_s >= self.saturation_backcalc_fallback_s:
+            ) or (
+                sustained_s >= self.saturation_backcalc_fallback_s
+                and self._delivered_power_reliable()
+            ):
                 _LOGGER.debug(
                     "PD anti-windup: re-anchoring base %.0fW -> measured %.0fW "
                     "(shortfall %.0fW, saturated=%s, sustained %.0fs)",
@@ -9479,7 +9495,13 @@ class ChargeDischargeController:
                     "No-PD direct tracking: error=%.1fW, previous=%.1fW, new=%.1fW",
                     error, self.previous_power, new_power,
                 )
-        elif not stale_safety_recalc and self._check_feedforward_step(error):
+        elif (
+            not stale_safety_recalc
+            # The deadbeat anchors on measured power; a lagging reading (#522)
+            # would turn it into a wrong-sized kick, so the PD covers the step.
+            and self._delivered_power_reliable()
+            and self._check_feedforward_step(error)
+        ):
             # Confirmed load step: one deadbeat cycle (measured - error), then the
             # PD resumes fine adjustment. Skips the rate limiter on purpose (a
             # 400W/s clamp would forfeit the burst response) but keeps the
@@ -9709,6 +9731,11 @@ class ChargeDischargeController:
                 await self._set_battery_power(coordinator, 0, 0)
             self.previous_power = 0
             self.previous_sensor = sensor_actual
+            # The base restarts from 0, so the derivative restarts too: a frozen
+            # previous_error re-fed the same stale step every blocked cycle and
+            # wound D up into a grid charge while importing.
+            self.previous_error = error
+            self.derivative_filtered = 0.0
             self._active_discharge_batteries = []
             self._active_charge_batteries = []
             # No battery can act: demand outside the deadband is battery-limited, not
@@ -9723,8 +9750,11 @@ class ChargeDischargeController:
         requested_distributed_power = new_power
         power_allocation = self._power_distribution._distribute_power_by_limits(abs(new_power), selected_batteries, is_charging)
         assigned_power = sum(power_allocation.values())
+        # Each battery's share is rounded to 5 W, so up to 2.5 W per battery can
+        # go missing without any phase cap; a real cap always cuts whole 5 W steps.
         phase_limited = self._phase_power_limiter.enabled and (
-            assigned_power + 1 < abs(requested_distributed_power)
+            assigned_power + 2.5 * len(selected_batteries) + 1
+            < abs(requested_distributed_power)
         )
         if self._phase_power_limiter.enabled:
             new_power = assigned_power if is_charging else -assigned_power
@@ -10700,6 +10730,47 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
 
 
+async def _setup_batteries_per_link(batteries, setup_battery):
+    """Run ``setup_battery(index, config)`` for every battery, concurrently per link.
+
+    Startup then costs the slowest battery, not the sum of all of them (#560:
+    four proxied batteries held HA ~70 s). Batteries behind the same link (a
+    gateway with several slave ids, a single-slot V3/EW11B port, one serial
+    port) stay sequential: concurrent connects would fight over the one TCP
+    slot and stretch the retry ladder. Returns coordinators in config order.
+    """
+    from .const import CONF_SERIAL_PORT
+
+    links: dict[tuple, list] = {}
+    for battery_index, battery_config in enumerate(batteries):
+        link = (
+            battery_config.get(CONF_HOST),
+            battery_config.get(CONF_PORT),
+            battery_config.get(CONF_SERIAL_PORT),
+        )
+        links.setdefault(link, []).append((battery_index, battery_config))
+
+    ready: dict = {}
+
+    async def _setup_link(members):
+        for battery_index, battery_config in members:
+            ready[battery_index] = await setup_battery(battery_index, battery_config)
+
+    results = await asyncio.gather(
+        *(_setup_link(members) for members in links.values()),
+        return_exceptions=True,
+    )
+    failure = next((r for r in results if isinstance(r, BaseException)), None)
+    if failure is not None:
+        # The other links kept connecting while one failed; release them so the
+        # setup retry does not find their single TCP slots still held.
+        for coordinator in ready.values():
+            with contextlib.suppress(Exception):
+                await coordinator.disconnect()
+        raise failure
+    return [ready[i] for i in sorted(ready)]
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Omnibattery from a config entry."""
     _async_register_services(hass)
@@ -10771,11 +10842,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .backup_discharge_store import async_get_backup_discharge_store
     backup_discharge_store = await async_get_backup_discharge_store(hass)
 
-    coordinators = []
     # A MAC shared by several batteries belongs to a Modbus gateway, not to a
     # battery; publishing it would merge them into one registry device.
     entry_macs = publishable_macs(entry.data["batteries"])
-    for battery_index, battery_config in enumerate(entry.data["batteries"]):
+
+    async def _setup_battery(battery_index, battery_config):
         coordinator = MarstekVenusDataUpdateCoordinator(
             hass,
             name=battery_config[CONF_NAME],
@@ -10927,8 +10998,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # all failed produces. Assigned rather than pushed through
             # async_set_updated_data: nothing was read, so this is not an update.
             coordinator.data = {}
-            coordinators.append(coordinator)
-            continue
+            return coordinator
 
         try:
             # Enable RS485 Control Mode first (required to apply configuration changes)
@@ -10982,7 +11052,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.disconnect()
             raise ConfigEntryNotReady(f"Failed to set up {coordinator.host}: {e}") from e
 
-        coordinators.append(coordinator)
+        return coordinator
+
+    coordinators = await _setup_batteries_per_link(entry.data["batteries"], _setup_battery)
 
     # Set up the charge/discharge controller BEFORE storing in hass.data
     # This allows the controller to register itself in hass.data[DOMAIN]["pid_controller"]

@@ -233,6 +233,29 @@ def test_solarflow_4000_mix_pro_exposes_dc_mppt_entities():
     assert "solar_power" in keys
 
 
+@pytest.mark.parametrize("model", [
+    ZENDURE_MODEL_SOLARFLOW_800,
+    ZENDURE_MODEL_SOLARFLOW_800_PLUS,
+    ZENDURE_MODEL_SOLARFLOW_800_PRO,
+])
+def test_solarflow_800_reports_aggregate_pv(model):
+    """#556: solarInputPower must count toward system solar production."""
+    caps = ZendureLocalDriver("192.168.1.100", model=model).capabilities
+
+    assert caps.has_solar_telemetry is True
+    assert caps.has_mppt_pv is False
+
+
+@pytest.mark.parametrize("model", [
+    ZENDURE_MODEL_2400AC_PLUS,
+    ZENDURE_MODEL_4000MIX_PRO,
+])
+def test_non_800_models_do_not_report_aggregate_pv(model):
+    caps = ZendureLocalDriver("192.168.1.100", model=model).capabilities
+
+    assert caps.has_solar_telemetry is False
+
+
 @pytest.mark.parametrize(("product", "model"), [
     ("solarFlow4000MixAC+", ZENDURE_MODEL_4000MIX_AC_PLUS),
     ("solarFlow4000MixPro", ZENDURE_MODEL_4000MIX_PRO),

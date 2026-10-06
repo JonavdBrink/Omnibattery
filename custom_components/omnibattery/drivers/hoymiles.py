@@ -508,7 +508,8 @@ class HoymilesMqttDriver(BatteryDriver):
         return DriverCapabilities(
             False, False, True, self._max_charge_w, self._max_discharge_w,
             False, False, False, has_solar_telemetry=self._has_pv,
-            has_energy_counters=True,
+            # chg_e/dchg_e are daily-only; lifetime totals are synthesised.
+            has_energy_counters=False,
             has_daily_energy_counters=True, has_nominal_capacity=False,
             setpoint_confirm_reliable=False, actuator_latency_s=1.8,
             readback_latency_s=4.0,

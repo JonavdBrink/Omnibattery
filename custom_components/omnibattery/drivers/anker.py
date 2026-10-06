@@ -339,6 +339,7 @@ class AnkerModbusDriver(BatteryDriver):
             has_energy_counters=True,
             has_daily_energy_counters=False,
             setpoint_confirm_reliable=False,
+            delivered_power_reliable=False,
             actuator_latency_s=1.0,
         )
 

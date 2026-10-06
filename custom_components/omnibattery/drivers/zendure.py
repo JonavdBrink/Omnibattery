@@ -103,6 +103,12 @@ _AC_COUPLED_MODELS: frozenset[str] = frozenset({
     ZENDURE_MODEL_4000MIX_AC_PLUS,
 })
 _MPPT_MODELS: frozenset[str] = frozenset({ZENDURE_MODEL_4000MIX_PRO})
+# PV-input models whose solarInputPower is independent DC production (issue #556).
+_AGGREGATE_PV_MODELS: frozenset[str] = frozenset({
+    ZENDURE_MODEL_SOLARFLOW_800,
+    ZENDURE_MODEL_SOLARFLOW_800_PLUS,
+    ZENDURE_MODEL_SOLARFLOW_800_PRO,
+})
 
 # Zendure API property name → logical coordinator key.
 _PROP_TO_KEY: dict[str, str] = {
@@ -339,12 +345,14 @@ class ZendureLocalDriver(BatteryDriver):
                 default_discharge_power if max_discharge_power_w is None else max_discharge_power_w
             ),
             has_mppt_pv=model in _MPPT_MODELS,
+            has_solar_telemetry=model in _AGGREGATE_PV_MODELS,
             has_alarm_registers=True,    # faultLevel + is_error
             has_rs485_control=False,
             has_energy_counters=False,   # no kWh / capacity in the report; synthesised
             has_nominal_capacity=False,  # configured by the user; absent from the report
             has_daily_energy_counters=False,
             setpoint_confirm_reliable=False,  # HTTP report echoes the previous limit for ~2 s
+            independent_power_planes=False,  # AC and cell power read identical (#556)
             actuator_latency_s=3.0,      # HTTP write + ~2-3 s engage/echo latency
         )
 
@@ -631,6 +639,7 @@ class ZendureLocalDriver(BatteryDriver):
                 else default_discharge_power
             ),
             has_mppt_pv=detected in _MPPT_MODELS,
+            has_solar_telemetry=detected in _AGGREGATE_PV_MODELS,
         )
 
         # The AC+ profile omits DC MPPT entities; the Pro profile exposes them.
