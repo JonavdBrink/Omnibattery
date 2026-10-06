@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1] - 2026-10-06
+
+### Fixed
+
+- **Dashboard: the Solar forecast and Solar remaining rows now open their sensor when the panel config arrives after Home Assistant's state**; they used to stay unlinked for the whole session. Each row opens only its own sensor, and a row without a configured sensor is no longer linked to the other one.
+- **Zonneplan zonnebonus** price calculation inconsistancy trough code and UI explanations.
+
 ## [1.5.0] - 2026-10-04
 
 ### Added
