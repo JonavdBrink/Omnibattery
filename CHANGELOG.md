@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1] - unreleased
+
+### Changed
+
+- **Zonneplan export bonus (zonnebonus) now follows Zonneplan's rules**: solar power only, on top of the tax-excluded price (+€0.02, then +10%), added to the tax-inclusive export price, between sunrise and sunset, and only when the tax-excluded price plus €0.02 is positive. Battery export is never valued with the bonus.
+- **Smart pre-discharge judges curtailment risk on the solar export price** when an export price sensor is configured (including the Zonneplan sun bonus), instead of the import price. Without an export sensor nothing changes; the discharge slots are still ranked on the import price.
+
 ## [1.5.0] - 2026-10-04
 
 ### Added
