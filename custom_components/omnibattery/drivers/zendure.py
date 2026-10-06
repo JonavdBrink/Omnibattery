@@ -352,6 +352,7 @@ class ZendureLocalDriver(BatteryDriver):
             has_nominal_capacity=False,  # configured by the user; absent from the report
             has_daily_energy_counters=False,
             setpoint_confirm_reliable=False,  # HTTP report echoes the previous limit for ~2 s
+            independent_power_planes=False,  # AC and cell power read identical (#556)
             actuator_latency_s=3.0,      # HTTP write + ~2-3 s engage/echo latency
         )
 

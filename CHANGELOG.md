@@ -6,7 +6,7 @@
 
 - **Marstek Venus D: no discharge after a Modbus reconnect** (#548): when the battery reports its max charge/discharge power as 0 W, the configured limit is now written back automatically (at most once a minute) instead of waiting for a manual rewrite. Thanks to @mxmrlt.
 - **Hoymiles: Battery Cycle Count stuck at 0** (#557): the battery only reports daily energy, so lifetime charge/discharge totals are now integrated from power. Thanks to @adonix31.
-- **Zendure SolarFlow 800 / Plus / Pro: PV not counted in System Solar Power or Daily Solar Production** (#556). Thanks to @adonix31.
+- **Zendure SolarFlow 800 / Plus / Pro: PV not counted in System Solar Power or Daily Solar Production** (#556). Lifetime Efficiency keeps using the charge/discharge totals. Thanks to @adonix31.
 - **Time Slot: a cleared second or third charging window came back** (#547): emptying a window's start and end in the options now removes it. Thanks to @schauveau.
 - **Panel: daily timeline failed to render without Charge Delay data** (#549). Thanks to @thijskaspers.
 - **Anker: PD oscillated after load steps** (#522): the control loop no longer re-anchors to (or kicks off) Anker's lagging power reading. Thanks to @wauswaus.
