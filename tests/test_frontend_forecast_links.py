@@ -24,9 +24,10 @@ vm.runInContext(src + "\n;this.__cls = MarstekVenusPanel;", ctx);
 Cls = ctx.__cls;
 
 const row = () => ({
-  classList: { add() {} },
+  classList: { add() {}, remove() {} },
   listeners: [],
   addEventListener(_t, fn) { this.listeners.push(fn); },
+  removeEventListener(_t, fn) { this.listeners = this.listeners.filter((l) => l !== fn); },
 });
 const inst = Object.create(Cls.prototype);
 const opened = [];

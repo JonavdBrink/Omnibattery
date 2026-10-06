@@ -7200,17 +7200,28 @@ class MarstekVenusPanel extends HTMLElement {
   // Mark an element as a more-info trigger (cursor + tooltip + click). No-op when
   // the entity is absent, so missing sensors stay non-clickable.
   _linkMoreInfo(el, entityId) {
-    if (!el || !entityId) return;
+    if (!el) return;
+    if (!entityId) {
+      // The sensor disappeared: drop the stale listener so the row stops opening it.
+      if (el._moreInfoHandler) {
+        el.removeEventListener("click", el._moreInfoHandler);
+        el._moreInfoHandler = null;
+      }
+      el._moreInfoEntity = null;
+      el.classList.remove("clickable");
+      el.title = "";
+      return;
+    }
     el.classList.add("clickable");
     el.title = this._t("moreInfo");
     // Re-linking only swaps the target; the listener is attached once.
-    const attached = !!el._moreInfoEntity;
     el._moreInfoEntity = entityId;
-    if (attached) return;
-    el.addEventListener("click", (e) => {
+    if (el._moreInfoHandler) return;
+    el._moreInfoHandler = (e) => {
       e.stopPropagation();
       this._moreInfo(el._moreInfoEntity);
-    });
+    };
+    el.addEventListener("click", el._moreInfoHandler);
   }
 
   _linkForecastRows() {
