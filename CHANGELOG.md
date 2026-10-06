@@ -12,6 +12,7 @@
 - **Anker: PD oscillated after load steps** (#522): the control loop no longer re-anchors to (or kicks off) Anker's lagging power reading. Thanks to @wauswaus.
 - **Multi-battery: a battery flipped between Discharge and idle at low load**: the surplus guard now needs a surplus to last a few seconds before blocking discharge, so a battery reading that lags its last command (or another battery's oscillation) no longer cuts it to 0.
 - **Grid charging in pulses with every battery blocked from discharging** (min SOC or Allow Discharge off): the PD's derivative no longer winds up while no battery can discharge, which used to push it into 400-1300 W charge pulses from the grid while the house was importing.
+- **Three-phase protection: PD Quality flickered to Battery Limited** (#559): the 5 W rounding of each battery's share no longer reads as a phase cap. Thanks to @dirkvanhoutert.
 
 ### Changed
 

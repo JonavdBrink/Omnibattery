@@ -930,3 +930,34 @@ def test_predictive_target_battery_absorbs_measured_export_only():
         asyncio.run(controller._handle_predictive_grid_charging())
     assert [w for w in writes if w[0] is surplus][-1][1] == 0
     assert controller._predictive_surplus_power == 0.0
+
+
+def _phase_limited_after_cycle(assigned_w):
+    """Run one 1003 W charge cycle with phase protection on and return the flag."""
+    first_report = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state_holder = {"state": _state(-1003, first_report)}
+    controller = _main_controller(state_holder, [])
+    controller.previous_power = 0.0
+    controller.last_output_sign = 0
+    controller.ki = 0.0
+    controller._power_distribution._rebalance_expired_load_sharing_hold = _async_false
+    controller._compute_pd_new_power = lambda *_args: 1003.0
+    controller._phase_power_limiter.enabled = True
+    controller._phase_power_limiter.has_degraded_phase = lambda: False
+    controller._power_distribution._distribute_power_by_limits = (
+        lambda _power, batteries, is_charging=None: {batteries[0]: assigned_w}
+    )
+    flags = []
+    controller._set_pd_limited = flags.append
+
+    asyncio.run(controller._run_control_cycle(now=first_report + timedelta(seconds=1)))
+    return flags[-1]
+
+
+def test_5w_rounding_is_not_reported_as_phase_limited():
+    # Issue #559: 1003 W rounded to 1000 W read as a phase cap.
+    assert _phase_limited_after_cycle(1000) is False
+
+
+def test_real_phase_cap_is_still_reported_as_limited():
+    assert _phase_limited_after_cycle(800) is True

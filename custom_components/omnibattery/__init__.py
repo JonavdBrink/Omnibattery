@@ -9750,8 +9750,11 @@ class ChargeDischargeController:
         requested_distributed_power = new_power
         power_allocation = self._power_distribution._distribute_power_by_limits(abs(new_power), selected_batteries, is_charging)
         assigned_power = sum(power_allocation.values())
+        # Each battery's share is rounded to 5 W, so up to 2.5 W per battery can
+        # go missing without any phase cap; a real cap always cuts whole 5 W steps.
         phase_limited = self._phase_power_limiter.enabled and (
-            assigned_power + 1 < abs(requested_distributed_power)
+            assigned_power + 2.5 * len(selected_batteries) + 1
+            < abs(requested_distributed_power)
         )
         if self._phase_power_limiter.enabled:
             new_power = assigned_power if is_charging else -assigned_power
