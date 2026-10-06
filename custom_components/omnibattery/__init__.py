@@ -9731,6 +9731,11 @@ class ChargeDischargeController:
                 await self._set_battery_power(coordinator, 0, 0)
             self.previous_power = 0
             self.previous_sensor = sensor_actual
+            # The base restarts from 0, so the derivative restarts too: a frozen
+            # previous_error re-fed the same stale step every blocked cycle and
+            # wound D up into a grid charge while importing.
+            self.previous_error = error
+            self.derivative_filtered = 0.0
             self._active_discharge_batteries = []
             self._active_charge_batteries = []
             # No battery can act: demand outside the deadband is battery-limited, not
